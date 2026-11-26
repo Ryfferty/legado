@@ -16,6 +16,11 @@ import io.legado.app.constant.EventBus
 import io.legado.app.data.entities.BaseSource
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.pack.PackCryptoBridge
+import io.legado.app.help.pack.PackHost
+import io.legado.app.help.pack.PackKvBridge
+import io.legado.app.help.pack.PackSourceIdentity
+import io.legado.app.help.pack.PackThreading
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieManager.cookieJarHeader
 import io.legado.app.help.http.CookieStore
@@ -61,11 +66,18 @@ import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.startActivity
 import io.legado.app.utils.toStringArray
 import io.legado.app.utils.toastOnUi
+import io.legado.pack.api.PackCaller
+import io.legado.pack.api.PackEntryPoint
+import io.legado.pack.api.PackId
+import io.legado.pack.api.PackInvocation
+import io.legado.pack.api.PackState
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import okio.use
 import org.jsoup.Connection
 import org.jsoup.Jsoup
@@ -94,6 +106,10 @@ import kotlin.coroutines.EmptyCoroutineContext
 import androidx.core.net.toUri
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ThemeConfig
+
+/** 严格 JSON 的无引号字面量（数字/true/false/null）；kotlinx 会把裸标识符当非字符串字面量放过。 */
+internal val STRICT_JSON_UNQUOTED: Regex =
+    Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null")
 
 internal fun parseJsRequestHeaders(headers: Any?): Map<String, String> {
     val rawHeaders = when (headers) {
@@ -133,6 +149,97 @@ interface JsExtensions : JsEncodeUtils {
      * 由 AnalyzeRule / JsSourceEngine 在执行 contentBatch 规则时提供。
      */
     fun getBatchContext(): BatchContentContext? = null
+
+    /**
+     * 扩展包作用域的键值存储。命名空间由宿主根据当前书源/订阅源身份和包 id
+     * 自动隔离，脚本不能伪造其他源的命名空间。
+     */
+    val packKV: PackKvBridge
+        get() = PackHost.newSourceKvBridge {
+            PackSourceIdentity.of(getSource())
+        }
+
+    /**
+     * 窄加密桥，复用既有 java.* 加密函数命名与行为，不替换旧的
+     * md5Encode/md5Encode16 等函数。属性名不能叫 crypto：存量书源脚本
+     * 会在 with(java) 里写 `var crypto = createSymmetricCrypto`，源对象上
+     * 任何名为 crypto 的成员都会遮蔽该变量并导致赋值被静默丢弃。
+     */
+    val packCrypto: PackCryptoBridge
+        get() = PackCryptoBridge
+
+    /**
+     * Compatibility alias for rules that call `java.md5(...)`; the historic
+     * `md5Encode`/`md5Encode16` functions remain unchanged.
+     */
+    fun md5(str: String): String = md5Encode(str)
+
+    /**
+     * 调用扩展包中 manifest 显式标记 sourceExported 的命令。
+     * 只接受 JSON 字符串作为参数，返回值也是 JSON 字符串；包管理器、
+     * 应用上下文、类加载器等宿主对象不会暴露给脚本。
+     */
+    fun engineCall(pack: String, cmd: String): String? =
+        engineCall(pack, cmd, null)
+
+    fun engineCall(pack: String, cmd: String, arg: String?): String? {
+        PackThreading.requireNotMainThread("java.engineCall")
+        val source = getSource()
+            ?: throw IllegalStateException("java.engineCall 只能在书源或订阅源脚本中调用")
+        val sourceKey = PackSourceIdentity.of(source)
+            ?: throw IllegalStateException("java.engineCall 无法确定当前源身份")
+        val packId = PackId.parse(pack)
+            ?: throw IllegalArgumentException("无效的扩展包 id: $pack")
+        val manager = PackHost.manager
+        val info = manager.info(packId)
+            ?: throw IllegalStateException("[PACK_NOT_FOUND] 扩展包 ${packId.value} 未安装")
+        when (info.state) {
+            PackState.DISABLED ->
+                throw IllegalStateException("[PACK_DISABLED] 扩展包 ${packId.value} 未启用")
+
+            PackState.NEEDS_RESTART ->
+                throw IllegalStateException("[NEEDS_RESTART] 扩展包 ${packId.value} 需要重启应用后重新启用")
+
+            // BROKEN 不在此拦截：管理器准入不因 runtimeBroken 拒绝，调用成功即
+            // markHealthy 自愈；桥上提前拒绝会让损坏的包永远无法恢复。
+            PackState.BROKEN, PackState.ENABLED -> Unit
+        }
+        val command = info.manifest.commandByName(cmd)
+        if (command == null || !command.sourceExported) {
+            throw IllegalStateException(
+                "[PERMISSION_DENIED] 命令 $cmd 未向书源脚本导出"
+            )
+        }
+        val invocation = PackInvocation(
+            expectedRef = info.ref,
+            entry = PackEntryPoint.SourceCommand(command.name),
+            argJson = normalizeEngineArg(arg),
+            caller = PackCaller.Source(sourceKey, source.getTag()),
+        )
+        val result = manager.invokeBlocking(invocation)
+        if (result.isError) {
+            throw IllegalStateException(
+                "[${result.code}] ${result.message ?: "扩展包调用失败"}"
+            )
+        }
+        return result.dataJson
+    }
+
+    private fun normalizeEngineArg(arg: String?): String {
+        if (arg == null || arg.isBlank()) return ""
+        val element = try {
+            Json.parseToJsonElement(arg)
+        } catch (error: Exception) {
+            throw IllegalArgumentException("java.engineCall 的 arg 必须是 JSON 字符串", error)
+        }
+        if (element is JsonPrimitive &&
+            !element.isString &&
+            !STRICT_JSON_UNQUOTED.matches(element.content)
+        ) {
+            throw IllegalArgumentException("java.engineCall 的 arg 必须是 JSON 字符串")
+        }
+        return arg
+    }
 
     /**
      * 批量下载时回存单章正文。

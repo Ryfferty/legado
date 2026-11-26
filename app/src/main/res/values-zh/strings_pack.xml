@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 扩展包管理界面 (PackManageActivity) -->
+    <string name="pack_manage_title">扩展包管理</string>
+    <string name="pack_manage_entry_title">扩展包管理</string>
+    <string name="pack_manage_entry_summary">管理已导入的扩展包:导入、启停、卸载、自检</string>
+    <string name="pack_manage_empty">暂无扩展包\n可通过右上角菜单导入扩展包文件</string>
+    <string name="pack_import_local">本地导入</string>
+    <string name="pack_import_select_title">选择扩展包文件</string>
+    <string name="pack_import_confirm">导入扩展包</string>
+    <string name="pack_import_checking">正在校验扩展包…</string>
+    <string name="pack_install">安装</string>
+    <string name="pack_import_open_stream_failed">无法读取所选文件</string>
+    <string name="pack_import_failed">导入扩展包失败</string>
+    <string name="pack_import_success">已安装：%s</string>
+    <string name="pack_new_install">全新安装</string>
+    <string name="pack_upgrade_line">已安装 %1$s (versionCode %2$d) → 导入 %3$s (versionCode %4$d)</string>
+    <string name="pack_list_load_failed">扩展包列表读取失败：%s</string>
+    <string name="pack_enable_failed">启停失败：%s</string>
+
+    <!-- manifest 字段 -->
+    <string name="pack_field_name">名称</string>
+    <string name="pack_field_id">包标识</string>
+    <string name="pack_field_version">版本</string>
+    <string name="pack_version_code_s">%1$s (versionCode %2$d)</string>
+    <string name="pack_field_author">作者</string>
+    <string name="pack_field_description">说明</string>
+    <string name="pack_field_pack_lib">框架版本门</string>
+    <string name="pack_field_components">组件</string>
+    <string name="pack_component_js">JS</string>
+    <string name="pack_component_dex">DEX</string>
+    <string name="pack_component_native">native</string>
+    <string name="pack_field_capabilities">能力</string>
+    <string name="pack_none">无</string>
+    <string name="pack_field_network">网络</string>
+    <string name="pack_field_network_reason">开放原因</string>
+    <string name="pack_field_commands_list">命令</string>
+    <string name="pack_command_source_exported">(书源可调用)</string>
+    <string name="pack_field_tools">MCP 工具</string>
+    <string name="pack_field_write_tools">写操作工具</string>
+    <string name="pack_tool_write_suffix">(写)</string>
+    <string name="pack_field_routes">Web 路由</string>
+    <string name="pack_field_self_tests">自检用例</string>
+    <string name="pack_field_content_sha">内容 SHA-256</string>
+    <string name="pack_field_warnings">警告</string>
+    <string name="pack_field_state">状态</string>
+    <string name="pack_field_installed_at">安装时间</string>
+    <string name="pack_field_revision">修订</string>
+
+    <!-- 状态 -->
+    <string name="pack_state_enabled">已启用</string>
+    <string name="pack_state_disabled">已停用</string>
+    <string name="pack_state_needs_restart">需重启进程</string>
+    <string name="pack_state_broken">已损坏</string>
+
+    <!-- 网络权限三档 -->
+    <string name="pack_network_none">无网络(未声明即全部拒绝)</string>
+    <string name="pack_network_allowlist">域名白名单:%s</string>
+    <string name="pack_network_allowlist_short">白名单</string>
+    <string name="pack_network_open">开放网络(任意域名)</string>
+    <string name="pack_network_open_short">开放网络</string>
+    <string name="pack_network_open_warning">此包声明 network=open,可访问任意域名(含重定向目标)。</string>
+    <string name="pack_network_open_approve">我已知晓并同意该扩展包访问任意域名</string>
+    <string name="pack_network_open_required">开放网络的扩展包必须勾选同意后才能安装</string>
+
+    <!-- 可信代码(DEX/native)风险 -->
+    <string name="pack_trusted_code_warning">此包包含 DEX/native 组件:将在阅读进程内直接执行,框架无法对可信代码做沙箱隔离。仅安装来源可信或自行编译的扩展包。</string>
+
+    <!-- 授权勾选 -->
+    <string name="pack_tools_label">MCP 工具授权(取消勾选则不注册)</string>
+    <string name="pack_routes_label">Web 路由授权</string>
+    <string name="pack_write_tool_hint">写操作工具默认关闭,需逐项显式开启</string>
+    <string name="pack_permission_changed">权限发生变化,需重新确认</string>
+    <string name="pack_permission_added">新增%1$s:%2$s</string>
+    <string name="pack_permission_removed">移除%1$s:%2$s</string>
+    <string name="pack_permission_network_changed">%s已变化</string>
+
+    <!-- 写操作工具授权(宿主 PackToolPermissionStore) -->
+    <string name="pack_write_tools_menu">写工具授权</string>
+    <string name="pack_write_tools_dialog_title">写工具授权</string>
+    <string name="pack_write_tools_hint">写操作工具默认关闭,开启前 MCP 调用一律拒绝。授权与已装修订绑定,升级或重装后自动失效需重新开启。</string>
+    <string name="pack_write_tools_none">该扩展包未声明写操作工具</string>
+    <string name="pack_write_tool_sync_failed">写工具授权同步失败</string>
+    <string name="pack_write_tools_load_failed">写工具授权读取失败:%s</string>
+    <string name="pack_write_tool_rejected">写工具未被授权:%s</string>
+    <string name="pack_not_found">扩展包不存在</string>
+
+    <!-- 自检 -->
+    <string name="pack_run_self_test">运行自检</string>
+    <string name="pack_view_self_test">查看自检报告</string>
+    <string name="pack_self_test_running">正在运行自检…</string>
+    <string name="pack_self_test_title">自检报告</string>
+    <string name="pack_self_test_none">该扩展包暂无自检报告</string>
+    <string name="pack_self_test_failed">自检失败:%s</string>
+    <string name="pack_self_test_run_id">运行 ID:%s</string>
+    <string name="pack_self_test_time">开始:%1$s  结束:%2$s</string>
+    <string name="pack_self_test_summary">用例 %1$d 个,通过 %2$d 个</string>
+    <string name="pack_self_test_case">%1$s:%2$s(%3$d ms)</string>
+    <string name="pack_self_test_case_with_message">%1$s:%2$s %3$s(%4$d ms)</string>
+    <string name="pack_self_test_status_pass">通过</string>
+    <string name="pack_self_test_status_fail">失败</string>
+    <string name="pack_self_test_status_error">错误</string>
+    <string name="pack_self_test_status_timeout">超时</string>
+    <string name="pack_self_test_status_skip">跳过</string>
+    <string name="pack_self_test_red_card">红牌:%s</string>
+    <string name="pack_self_test_metrics_elapsed">总耗时:%d ms</string>
+
+    <!-- 卸载 -->
+    <string name="pack_uninstall">卸载</string>
+    <string name="pack_uninstall_confirm">确定卸载扩展包 %s?\n包文件、注册与授权将一并移除。</string>
+    <string name="pack_uninstall_running">正在卸载…</string>
+    <string name="pack_uninstall_title">卸载报告</string>
+    <string name="pack_uninstall_done">卸载完成,无残留</string>
+    <string name="pack_uninstall_not_clean">卸载后仍有残留,请查看报告</string>
+    <string name="pack_uninstall_failed_error">卸载失败:%s</string>
+    <string name="pack_uninstall_clean">卸载干净:无残留路径、无驻留代码、无需重启</string>
+    <string name="pack_uninstall_registration_revoked">注册已撤销:%s</string>
+    <string name="pack_uninstall_registration_kept">注册未撤销</string>
+    <string name="pack_uninstall_residual_paths">残留路径:</string>
+    <string name="pack_uninstall_resident">仍有代码驻留内存(需重启释放)</string>
+    <string name="pack_uninstall_needs_restart">需重启进程</string>
+    <string name="pack_uninstall_failure">卸载故障:%s</string>
+
+    <!-- 条目菜单 -->
+    <string name="pack_detail">详情</string>
+
+</resources>

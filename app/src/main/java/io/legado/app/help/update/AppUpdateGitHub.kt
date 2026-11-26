@@ -24,7 +24,7 @@ object AppUpdateGitHub : AppUpdate.AppUpdateInterface {
 
     private suspend fun getLatestRelease(): List<AppReleaseInfo> {
         val lastReleaseUrl =
-            "https://api.github.com/repos/LegadoTeam/legado/releases?per_page=30"
+            "https://api.github.com/repos/Ryfferty/legado/releases?per_page=30"
         val res = okHttpClient.newCallResponse {
             url(lastReleaseUrl)
         }
@@ -46,7 +46,7 @@ object AppUpdateGitHub : AppUpdate.AppUpdateInterface {
 
     private suspend fun getBetaRelease(): List<AppReleaseInfo> {
         val res = okHttpClient.newCallResponse {
-            url("https://api.github.com/repos/LegadoTeam/legado/releases/tags/beta")
+            url("https://api.github.com/repos/Ryfferty/legado/releases/tags/beta")
         }
         if (!res.isSuccessful) {
             throw NoStackTraceException(
@@ -108,21 +108,15 @@ object AppUpdateGitHub : AppUpdate.AppUpdateInterface {
 }
 
 internal fun AppReleaseInfo.toUpdateInfo(isBeta: Boolean = false): AppUpdate.UpdateInfo {
-    val primaryUrl = if (isBeta) downloadUrl else resolveAppUpdateDownloadUrl(name, downloadUrl)
-    val mirrorUrl = if (isBeta) null else resolveAppUpdateMirrorUrl(name, primaryUrl)
-    val alternateMirrorUrl = if (isBeta) {
-        null
-    } else {
-        resolveAppUpdateAlternateMirrorUrl(name, primaryUrl, mirrorUrl)
-    }
+    // Fork releases: use GitHub asset URLs directly. No CDN mirrors.
     return AppUpdate.UpdateInfo(
         tagName = versionName,
         updateLog = note,
-        downloadUrl = primaryUrl,
+        downloadUrl = downloadUrl,
         fileName = name,
-        backupDownloadUrl = if (isBeta) null else resolveAppUpdateBackupUrl(primaryUrl, downloadUrl),
-        mirrorDownloadUrl = mirrorUrl,
-        alternateMirrorDownloadUrl = alternateMirrorUrl,
+        backupDownloadUrl = null,
+        mirrorDownloadUrl = null,
+        alternateMirrorDownloadUrl = null,
         size = size,
         createdAt = createdAt,
         isBeta = isBeta

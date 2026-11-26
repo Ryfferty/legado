@@ -35,6 +35,7 @@ import io.legado.app.receiver.SharedReceiverActivity
 import io.legado.app.service.McpService
 import io.legado.app.service.WebService
 import io.legado.app.ui.file.HandleFileContract
+import io.legado.app.ui.pack.PackManageActivity
 import io.legado.app.ui.video.config.SettingsDialog
 import io.legado.app.ui.widget.code.addJsonPattern
 import io.legado.app.ui.widget.number.NumberPickerDialog
@@ -48,6 +49,7 @@ import io.legado.app.utils.removePref
 import io.legado.app.utils.restart
 import io.legado.app.utils.setEdgeEffectColor
 import io.legado.app.utils.showDialogFragment
+import io.legado.app.utils.startActivity
 import io.legado.app.utils.supportsPromotedNotifications
 import io.legado.app.utils.toastOnUi
 import splitties.init.appCtx
@@ -179,6 +181,8 @@ class OtherConfigFragment : PreferenceFragment(),
                 .show {
                     AppConfig.mcpPort = it
                 }
+
+            "packManage" -> startActivity<PackManageActivity>()
 
             PreferKey.cleanCache -> clearCache()
             PreferKey.uploadRule -> showDialogFragment<DirectLinkUploadConfig>()

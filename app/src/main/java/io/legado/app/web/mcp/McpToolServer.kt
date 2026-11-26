@@ -9,6 +9,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.help.IntentData
+import io.legado.app.help.pack.PackHost
 import io.legado.app.help.http.CookieManager
 import io.legado.app.help.http.CookieStore
 import io.legado.app.help.http.HttpLogRecord
@@ -69,6 +70,11 @@ object McpToolServer {
     private const val NOTIFICATION_TIMEOUT_MS = 500L
     private val debugScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val debugMutex = Mutex()
+    private val serverLock = Any()
+    @Volatile
+    private var sharedServer: Server? = null
+    @Volatile
+    private var sharedBridge: PackMcpBridge? = null
     private val localReadToolAnnotations = ToolAnnotations(
         readOnlyHint = true,
         openWorldHint = false,
@@ -86,7 +92,38 @@ object McpToolServer {
         openWorldHint = true,
     )
 
-    fun create(): Server {
+    /**
+     * Returns the process-wide MCP server. Streamable HTTP calls this factory
+     * once per client session while the SDK keeps one [Server] for all
+     * sessions; sharing the instance is what makes a pack tool added after a
+     * session connected visible to that session through the SDK's
+     * `listChanged` notification.
+     */
+    fun create(): Server = synchronized(serverLock) {
+        sharedServer ?: buildServer().also { server ->
+            val permissions = PackHost.toolPermissions
+            val bridge = PackMcpBridge(
+                server = server,
+                managerProvider = { PackHost.manager },
+                permissions = permissions,
+            )
+            McpPackTools(
+                managerProvider = { PackHost.manager },
+                permissions = permissions,
+                bridge = bridge,
+            ).register(server)
+            bridge.attach(PackHost.registry)
+            // Force only metadata admission so already-installed packs appear
+            // in this session's tool list. This must not execute package code;
+            // first invocation remains the only load trigger.
+            runCatching { PackHost.manager.list() }
+                .onFailure { it.printOnDebug() }
+            sharedBridge = bridge
+            sharedServer = server
+        }
+    }
+
+    private fun buildServer(): Server {
         return Server(
             serverInfo = Implementation(
                 name = "legado",
@@ -94,7 +131,7 @@ object McpToolServer {
             ),
             options = ServerOptions(
                 capabilities = ServerCapabilities(
-                    tools = ServerCapabilities.Tools(listChanged = false),
+                    tools = ServerCapabilities.Tools(listChanged = true),
                     resources = ServerCapabilities.Resources(),
                     logging = ServerCapabilities.Logging,
                 ),
@@ -102,6 +139,14 @@ object McpToolServer {
         ).also {
             registerTools(it)
             registerResources(it)
+        }
+    }
+
+    internal fun resetForTest() {
+        synchronized(serverLock) {
+            sharedBridge?.close()
+            sharedBridge = null
+            sharedServer = null
         }
     }
 

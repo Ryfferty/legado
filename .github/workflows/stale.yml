@@ -15,7 +15,7 @@ jobs:
   stale:
 
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'LegadoTeam/legado' }}
+    if: ${{ github.repository == 'Ryfferty/legado' }}
     permissions:
       issues: write
 

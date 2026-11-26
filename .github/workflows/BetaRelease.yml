@@ -196,7 +196,7 @@ jobs:
 
   release:
     needs: [prepare, build, CDN]
-    if: github.event_name != 'pull_request' && github.repository == 'LegadoTeam/legado'
+    if: github.event_name != 'pull_request' && github.repository == 'Ryfferty/legado'
     runs-on: ubuntu-latest
     permissions:
       contents: write

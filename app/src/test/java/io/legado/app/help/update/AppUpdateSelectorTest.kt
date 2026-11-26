@@ -418,18 +418,14 @@ class AppUpdateSelectorTest {
                 "https://cdn.gigu.edu.kg/app/legado_app_release.apk"
             )
         )
+        // Fork releases ship from this repo's GitHub assets directly; the CDN
+        // mirror layer is no longer consulted by toUpdateInfo.
         val update = release("legado_app_release.apk").copy(downloadUrl = githubUrl)
             .toUpdateInfo()
-        assertEquals(cdnUrl, update.downloadUrl)
-        assertEquals(
-            "https://cdn.gigu.edu.kg/app/legado_app_release.apk",
-            update.mirrorDownloadUrl
-        )
-        assertEquals(
-            "https://cdn.mgz.edu.kg/app/legado_app_release.apk",
-            update.alternateMirrorDownloadUrl
-        )
-        assertEquals(githubUrl, update.backupDownloadUrl)
+        assertEquals(githubUrl, update.downloadUrl)
+        assertNull(update.mirrorDownloadUrl)
+        assertNull(update.alternateMirrorDownloadUrl)
+        assertNull(update.backupDownloadUrl)
         assertNull(resolveAppUpdateBackupUrl(githubUrl, githubUrl))
         assertTrue(isIgnoredAppUpdate("3.26080220", "3.26080220"))
         assertFalse(isIgnoredAppUpdate("3.26080221", "3.26080220"))

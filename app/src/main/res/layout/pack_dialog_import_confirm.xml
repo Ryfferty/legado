@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/tool_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:theme="?attr/actionBarStyle"
+        app:popupTheme="@style/AppTheme.PopupOverlay"
+        app:title="@string/pack_import_confirm"
+        app:titleTextAppearance="@style/ToolbarTitle" />
+
+    <ScrollView
+        android:id="@+id/scroll_view"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/tv_upgrade_line"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="8dp"
+                android:textColor="@color/secondaryText"
+                android:textSize="13sp"
+                tools:text="已安装 1.0.0 (versionCode 10) → 导入 1.2.0 (versionCode 12)" />
+
+            <TextView
+                android:id="@+id/tv_permission_diff"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="8dp"
+                android:textColor="@color/error"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:text="权限发生变化, 需重新确认"
+                tools:visibility="visible" />
+
+            <TextView
+                android:id="@+id/tv_summary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="8dp"
+                android:textColor="@color/primaryText"
+                android:textSize="13sp"
+                tools:text="名称: hello-pack&#10;包标识: demo.hello" />
+
+            <TextView
+                android:id="@+id/tv_network_open_warning"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:text="@string/pack_network_open_warning"
+                android:textColor="@color/error"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <io.legado.app.lib.theme.view.ThemeCheckBox
+                android:id="@+id/cb_network_open"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="4dp"
+                android:text="@string/pack_network_open_approve"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <TextView
+                android:id="@+id/tv_trusted_code"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:text="@string/pack_trusted_code_warning"
+                android:textColor="@color/error"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <TextView
+                android:id="@+id/tv_tools_label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:text="@string/pack_tools_label"
+                android:textColor="@color/primaryText"
+                android:textStyle="bold"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <LinearLayout
+                android:id="@+id/ll_tools"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/tv_write_tool_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/pack_write_tool_hint"
+                android:textColor="@color/secondaryText"
+                android:textSize="12sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <TextView
+                android:id="@+id/tv_routes_label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:text="@string/pack_routes_label"
+                android:textColor="@color/primaryText"
+                android:textStyle="bold"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <LinearLayout
+                android:id="@+id/ll_routes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/tv_error"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="12dp"
+                android:textColor="@color/error"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:text="[PERMISSION_DENIED] ..."
+                tools:visibility="visible" />
+
+        </LinearLayout>
+    </ScrollView>
+
+    <com.google.android.flexbox.FlexboxLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        app:flexWrap="wrap"
+        app:justifyContent="flex_end">
+
+        <TextView
+            android:id="@+id/tv_cancel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:text="@string/cancel"
+            android:textColor="@color/secondaryText" />
+
+        <io.legado.app.ui.widget.text.AccentTextView
+            android:id="@+id/tv_ok"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:text="@string/pack_install" />
+
+    </com.google.android.flexbox.FlexboxLayout>
+
+</LinearLayout>

@@ -30,8 +30,6 @@ object AppConst {
 
     const val DEFAULT_WEBDAV_ID = -1L
 
-    private const val OFFICIAL_SIGNATURE =
-        "8DACBF25EC667C9B1374DB1450C1A866C2AAA1173016E80BF6AD2F06FABDDC08"
     val timeFormat: FastDateFormat by lazy {
         FastDateFormat.getInstance("HH:mm")
     }
@@ -66,12 +64,9 @@ object AppConst {
         appCtx.packageManager.getPackageInfo(appCtx.packageName, PackageManager.GET_ACTIVITIES)
             ?.let {
                 appInfo.versionName = it.versionName!!
-                appInfo.appVariant = when {
-                    it.packageName.contains("releaseA") -> AppVariant.BETA_RELEASEA
-                    isBeta -> AppVariant.BETA_RELEASE
-                    isOfficial -> AppVariant.OFFICIAL
-                    else -> AppVariant.UNKNOWN
-                }
+                // Single-keystore fork: no variant split. The beta update channel is
+                // gated by the signature hash stored in resolveBetaUpdateVariant.
+                appInfo.appVariant = AppVariant.OFFICIAL
 
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                     appInfo.versionCode = it.longVersionCode
@@ -106,13 +101,6 @@ object AppConst {
         }
     }
 
-    private val sha256Signature: String?
-        get() = sha256Signatures.singleOrNull()
-
-    private val isOfficial = sha256Signature == OFFICIAL_SIGNATURE
-
-    private val isBeta = sha256Signature == BETA_SIGNATURE || BuildConfig.DEBUG
-
     val betaUpdateVariant: AppVariant? by lazy {
         resolveBetaUpdateVariant(appCtx.packageName, sha256Signatures)
     }
@@ -139,10 +127,10 @@ internal fun resolveBetaUpdateVariant(
     signatureSha256: List<String>
 ): AppVariant? {
     val currentSignature = signatureSha256.singleOrNull() ?: return null
+    // Beta update channel is gated by a separate signing key.
+    // The beta signature SHA-256 must be set by the fork maintainer
+    // and matched against the installed APK's signing certificate.
+    // With a single-keystore fork there is no beta channel by default.
     if (!currentSignature.equals(BETA_SIGNATURE, ignoreCase = true)) return null
-    return when (packageName) {
-        "com.legado.app.release" -> AppVariant.BETA_RELEASE
-        "com.legado.app.releaseA" -> AppVariant.BETA_RELEASEA
-        else -> null
-    }
+    return AppVariant.BETA_RELEASE
 }

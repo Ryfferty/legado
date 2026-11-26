@@ -63,7 +63,7 @@ android {
         }
     }
     defaultConfig {
-        applicationId "com.legado.app"
+        applicationId "io.legado.ryz"
         minSdk 23
         targetSdk 36
         versionCode = versionCodeValue
@@ -112,12 +112,7 @@ android {
             if (project.hasProperty("RELEASE_STORE_FILE")) {
                 signingConfig = signingConfigs.myConfig
             }
-            applicationIdSuffix '.release'
-            if (getApplicationIdSuffix() == '.releaseA') {
-                manifestPlaceholders.put("app_name", "@string/app_name_a")
-            } else {
-                manifestPlaceholders.put("app_name", "@string/app_name")
-            }
+            manifestPlaceholders.put("app_name", "@string/app_name")
 
             minifyEnabled true
             shrinkResources = true
@@ -129,8 +124,6 @@ android {
             }
             manifestPlaceholders.put("app_name", "@string/app_name")
 
-            applicationIdSuffix '.debug'
-            versionNameSuffix 'debug'
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro', 'cronet-proguard-rules.pro'
         }
@@ -304,6 +297,7 @@ dependencies {
     implementation(libs.json.path)
     implementation(libs.jsoupxpath)
     implementation(project(path: ':modules:book'))
+    implementation(project(path: ':modules:pack'))
     implementation(project(path: ':modules:rhino'))
 
     //JS rhino

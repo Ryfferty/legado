@@ -226,6 +226,12 @@
         <activity
             android:name=".ui.config.ConfigActivity"
             android:launchMode="standard" />
+        <!-- 扩展包管理 -->
+        <activity
+            android:name=".ui.pack.PackManageActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind" />
         <!-- 底栏图集 -->
         <activity
             android:name=".ui.config.BottomBarSkinActivity"

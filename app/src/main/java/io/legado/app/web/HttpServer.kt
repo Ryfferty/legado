@@ -7,6 +7,7 @@ import io.legado.app.api.controller.BookController
 import io.legado.app.api.controller.BookSourceController
 import io.legado.app.api.controller.BookSourceCheckController
 import io.legado.app.api.controller.HttpLogController
+import io.legado.app.api.controller.PackController
 import io.legado.app.api.controller.ReplaceRuleController
 import io.legado.app.api.controller.ReviewController
 import io.legado.app.api.controller.RssSourceController
@@ -16,6 +17,7 @@ import io.legado.app.utils.GSON
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.web.utils.AssetsWeb
+import io.legado.pack.api.PackRoutes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import okio.Pipe
@@ -42,6 +44,13 @@ class HttpServer(port: Int) : NanoHTTPD(port) {
         }
 
         try {
+            if (session.method != Method.OPTIONS && PackRoutes.isPackPath(uri)) {
+                // Pack routes own the whole /packs/ prefix: authenticate and
+                // dispatch here, before the generic POST path can read a body
+                // and before AssetsWeb could turn an unknown pack path into a
+                // static asset response.
+                return servePackRequest(session)
+            }
             when (session.method) {
                 Method.OPTIONS -> {
                     val response = newFixedLengthResponse(
@@ -232,6 +241,52 @@ class HttpServer(port: Int) : NanoHTTPD(port) {
 
     }
 
+    private fun servePackRequest(session: IHTTPSession): Response {
+        val result = runBlocking {
+            PackController.handle(
+                method = session.method.name,
+                uri = session.uri,
+                headers = session.headers,
+                remoteAddress = session.remoteIpAddress,
+                readBody = {
+                    val files = HashMap<String, String>()
+                    session.parseBody(files)
+                    files["postData"]
+                },
+            )
+        }
+        val status = object : Response.IStatus {
+            override fun getRequestStatus(): Int = result.statusCode
+
+            override fun getDescription(): String = when (result.statusCode) {
+                200 -> "OK"
+                400 -> "Bad Request"
+                401 -> "Unauthorized"
+                403 -> "Forbidden"
+                404 -> "Not Found"
+                405 -> "Method Not Allowed"
+                408 -> "Request Timeout"
+                409 -> "Conflict"
+                413 -> "Payload Too Large"
+                500 -> "Internal Server Error"
+                503 -> "Service Unavailable"
+                504 -> "Gateway Timeout"
+                else -> "Pack API"
+            }
+        }
+        return newFixedLengthResponse(
+            status,
+            result.contentType,
+            result.body,
+        ).apply {
+            result.headers.forEach { (name, value) -> addHeader(name, value) }
+            addWebHeaders(session.headers["origin"], session.uri)
+            if (result.closeConnection) {
+                closeConnection(true)
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "HttpServer"
         private const val JSON_MIME = "application/json; charset=utf-8"
@@ -276,7 +331,8 @@ class HttpServer(port: Int) : NanoHTTPD(port) {
         origin?.let { addHeader("Access-Control-Allow-Origin", it) }
         if (
             uri in PROTECTED_HTTP_LOG_READ_ROUTES ||
-            uri == "/getJsSourceApiTokenRequired"
+            uri == "/getJsSourceApiTokenRequired" ||
+            PackRoutes.isPackPath(uri)
         ) {
             addHeader("Cache-Control", "no-store")
         }

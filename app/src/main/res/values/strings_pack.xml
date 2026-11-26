@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 扩展包管理界面 (PackManageActivity) -->
+    <string name="pack_manage_title">Extension packs</string>
+    <string name="pack_manage_entry_title">Extension packs</string>
+    <string name="pack_manage_entry_summary">Manage imported packs: import, enable/disable, uninstall, self-test</string>
+    <string name="pack_manage_empty">No extension packs yet.\nImport a pack file from the menu.</string>
+    <string name="pack_import_local">Import local</string>
+    <string name="pack_import_select_title">Select pack file</string>
+    <string name="pack_import_confirm">Import pack</string>
+    <string name="pack_import_checking">Verifying pack…</string>
+    <string name="pack_install">Install</string>
+    <string name="pack_import_open_stream_failed">Cannot read the selected file</string>
+    <string name="pack_import_failed">Failed to import the pack</string>
+    <string name="pack_import_success">Installed: %s</string>
+    <string name="pack_new_install">Fresh install</string>
+    <string name="pack_upgrade_line">Installed %1$s (versionCode %2$d) → importing %3$s (versionCode %4$d)</string>
+    <string name="pack_list_load_failed">Failed to load packs: %s</string>
+    <string name="pack_enable_failed">Enable/disable failed: %s</string>
+
+    <!-- manifest 字段 -->
+    <string name="pack_field_name">Name</string>
+    <string name="pack_field_id">Pack id</string>
+    <string name="pack_field_version">Version</string>
+    <string name="pack_version_code_s">%1$s (versionCode %2$d)</string>
+    <string name="pack_field_author">Author</string>
+    <string name="pack_field_description">Description</string>
+    <string name="pack_field_pack_lib">packLib gate</string>
+    <string name="pack_field_components">Components</string>
+    <string name="pack_component_js">JS</string>
+    <string name="pack_component_dex">DEX</string>
+    <string name="pack_component_native">native</string>
+    <string name="pack_field_capabilities">Capabilities</string>
+    <string name="pack_none">none</string>
+    <string name="pack_field_network">Network</string>
+    <string name="pack_field_network_reason">Open reason</string>
+    <string name="pack_field_commands_list">Commands</string>
+    <string name="pack_command_source_exported">(callable from book sources)</string>
+    <string name="pack_field_tools">MCP tools</string>
+    <string name="pack_field_write_tools">Write tools</string>
+    <string name="pack_tool_write_suffix">(write)</string>
+    <string name="pack_field_routes">Web routes</string>
+    <string name="pack_field_self_tests">Self-tests</string>
+    <string name="pack_field_content_sha">Content SHA-256</string>
+    <string name="pack_field_warnings">Warnings</string>
+    <string name="pack_field_state">State</string>
+    <string name="pack_field_installed_at">Installed at</string>
+    <string name="pack_field_revision">Revision</string>
+
+    <!-- 状态 -->
+    <string name="pack_state_enabled">Enabled</string>
+    <string name="pack_state_disabled">Disabled</string>
+    <string name="pack_state_needs_restart">Needs restart</string>
+    <string name="pack_state_broken">Broken</string>
+
+    <!-- 网络权限三档 -->
+    <string name="pack_network_none">No network (undeclared means deny all)</string>
+    <string name="pack_network_allowlist">Domain allowlist: %s</string>
+    <string name="pack_network_allowlist_short">allowlist</string>
+    <string name="pack_network_open">Open network (any host)</string>
+    <string name="pack_network_open_short">open network</string>
+    <string name="pack_network_open_warning">This pack declares network=open and may access any host, including redirect targets.</string>
+    <string name="pack_network_open_approve">I understand and allow this pack to access any host</string>
+    <string name="pack_network_open_required">An open-network pack can only be installed after explicit approval</string>
+
+    <!-- 可信代码(DEX/native)风险 -->
+    <string name="pack_trusted_code_warning">This pack contains DEX/native components: they run inside the app process and the framework cannot sandbox trusted code. Install only packs from trusted sources.</string>
+
+    <!-- 授权勾选 -->
+    <string name="pack_tools_label">MCP tool grants (unchecked tools stay unregistered)</string>
+    <string name="pack_routes_label">Web route grants</string>
+    <string name="pack_write_tool_hint">Write tools start unchecked and must be enabled explicitly</string>
+    <string name="pack_permission_changed">Permissions changed; confirmation is required again</string>
+    <string name="pack_permission_added">Added %1$s: %2$s</string>
+    <string name="pack_permission_removed">Removed %1$s: %2$s</string>
+    <string name="pack_permission_network_changed">%s changed</string>
+
+    <!-- 写操作工具授权(宿主 PackToolPermissionStore) -->
+    <string name="pack_write_tools_menu">Write tool grants</string>
+    <string name="pack_write_tools_dialog_title">Write tool grants</string>
+    <string name="pack_write_tools_hint">Write tools stay off by default; MCP calls remain denied until a tool is enabled here. Grants are bound to the installed revision and are invalidated by upgrade or reinstall.</string>
+    <string name="pack_write_tools_none">This pack declares no write tools</string>
+    <string name="pack_write_tool_sync_failed">Failed to sync write tool grants</string>
+    <string name="pack_write_tools_load_failed">Failed to load write tool grants: %s</string>
+    <string name="pack_write_tool_rejected">Write tool not granted: %s</string>
+    <string name="pack_not_found">Pack not found</string>
+
+    <!-- 自检 -->
+    <string name="pack_run_self_test">Run self-test</string>
+    <string name="pack_view_self_test">View self-test report</string>
+    <string name="pack_self_test_running">Running self-test…</string>
+    <string name="pack_self_test_title">Self-test report</string>
+    <string name="pack_self_test_none">No self-test report for this pack yet</string>
+    <string name="pack_self_test_failed">Self-test failed: %s</string>
+    <string name="pack_self_test_run_id">Run id: %s</string>
+    <string name="pack_self_test_time">Started: %1$s  Finished: %2$s</string>
+    <string name="pack_self_test_summary">%1$d cases, %2$d passed</string>
+    <string name="pack_self_test_case">%1$s: %2$s (%3$d ms)</string>
+    <string name="pack_self_test_case_with_message">%1$s: %2$s %3$s (%4$d ms)</string>
+    <string name="pack_self_test_status_pass">PASS</string>
+    <string name="pack_self_test_status_fail">FAIL</string>
+    <string name="pack_self_test_status_error">ERROR</string>
+    <string name="pack_self_test_status_timeout">TIMEOUT</string>
+    <string name="pack_self_test_status_skip">SKIP</string>
+    <string name="pack_self_test_red_card">Red card: %s</string>
+    <string name="pack_self_test_metrics_elapsed">Elapsed: %d ms</string>
+
+    <!-- 卸载 -->
+    <string name="pack_uninstall">Uninstall</string>
+    <string name="pack_uninstall_confirm">Uninstall pack %s?\nPack files, registration and grants will be removed.</string>
+    <string name="pack_uninstall_running">Uninstalling…</string>
+    <string name="pack_uninstall_title">Uninstall report</string>
+    <string name="pack_uninstall_done">Uninstalled with no residue</string>
+    <string name="pack_uninstall_not_clean">Residue remains after uninstall; see the report</string>
+    <string name="pack_uninstall_failed_error">Uninstall failed: %s</string>
+    <string name="pack_uninstall_clean">Clean uninstall: no residual paths, no resident code, no restart required</string>
+    <string name="pack_uninstall_registration_revoked">Registration revoked: %s</string>
+    <string name="pack_uninstall_registration_kept">Registration NOT revoked</string>
+    <string name="pack_uninstall_residual_paths">Residual paths:</string>
+    <string name="pack_uninstall_resident">Code is still resident in memory (restart to release)</string>
+    <string name="pack_uninstall_needs_restart">Process restart required</string>
+    <string name="pack_uninstall_failure">Uninstall failure: %s</string>
+
+    <!-- 条目菜单 -->
+    <string name="pack_detail">Details</string>
+
+</resources>
