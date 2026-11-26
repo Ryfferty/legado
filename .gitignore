@@ -1,6 +1,12 @@
 *.iml
 .gradle
 local.properties
+# Fork signing: keystore files and signing config must never be committed.
+*.jks
+*.keystore
+signing.properties
+# Workflow drafts and run scripts are machine-local, never committed.
+/.zcode/
 .DS_Store
 /build
 build/

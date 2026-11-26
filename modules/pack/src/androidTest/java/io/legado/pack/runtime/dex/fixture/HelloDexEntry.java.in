@@ -1,0 +1,28 @@
+// Template input for a separate javac + D8 fixture task. Do not compile this
+// into the host/test APK classpath: only the resulting DEX is an androidTest asset.
+package io.legado.pack.fixture;
+
+import io.legado.pack.api.CloseOutcome;
+import io.legado.pack.api.PackCallContext;
+import io.legado.pack.api.PackContext;
+import io.legado.pack.api.PackEntry;
+
+public final class HelloDexEntry implements PackEntry {
+    private boolean initialized;
+    public HelloDexEntry() { }
+    @Override public void initialize(PackContext context, PackCallContext call) {
+        call.checkActive(System.nanoTime());
+        initialized = true;
+    }
+    @Override public String invoke(String command, String argJson, PackCallContext call) {
+        call.checkActive(System.nanoTime());
+        if (!initialized) throw new IllegalStateException("not initialized");
+        if (command.equals("hello")) return "{\"ok\":true,\"runtime\":\"dex\"}";
+        if (command.equals("echo")) return argJson;
+        throw new IllegalArgumentException(command);
+    }
+    @Override public CloseOutcome close() {
+        initialized = false;
+        return CloseOutcome.Companion.released();
+    }
+}

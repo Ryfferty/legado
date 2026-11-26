@@ -1,0 +1,60 @@
+plugins {
+    alias libs.plugins.android.library
+    alias libs.plugins.kotlin.android
+}
+
+android {
+    compileSdk = compile_sdk_version
+    namespace = 'io.legado.pack'
+    // Pinned to stable SDK packages compatible with AGP 8.13.2. Both must be
+    // installed through the SDK manager before a native build can configure.
+    ndkVersion = libs.versions.ndk.get()
+    kotlin {
+        jvmToolchain {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }
+    }
+    defaultConfig {
+        minSdk 23
+        targetSdk 36
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+    externalNativeBuild {
+        cmake {
+            // Page-size linker flags stay in CMakeLists.txt; this version matches
+            // its cmake_minimum_required(3.22.1).
+            path file('CMakeLists.txt')
+            version = libs.versions.cmake.get()
+        }
+    }
+    lint {
+        checkDependencies = true
+    }
+}
+
+dependencies {
+    // Suspend contracts are part of the public facade; implementations and callers
+    // share the host's coroutine runtime.
+    api libs.kotlinx.coroutines.core
+
+    // The JS provider runs on the host's Rhino fork; modules:rhino exposes
+    // htmlunit-core-js as api.
+    implementation project(path: ':modules:rhino')
+
+    // OkHttp types are used by PackHttpClientImpl/PackCookieJar. The OkHttp 5
+    // AAR ships consumer rules and relies on the host enabling desugaring.
+    implementation libs.okhttp
+
+    // Gson is used only inside the strict manifest JSON parser. It is not part of
+    // the public API; callers only see JsonValue / PackManifest.
+    implementation libs.gson
+
+    testImplementation libs.junit
+}
