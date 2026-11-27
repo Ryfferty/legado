@@ -6,12 +6,15 @@
     "versionCode": 1,
     "packLib": ">=1.0.0 <2.0.0",
     "description": "Minimal DEX pack sample; build classes.dex from src/ first",
-    "capabilities": [],
+    "capabilities": ["SELF_TEST"],
     "components": [
         { "id": "main", "type": "dex", "path": "classes.dex", "class": "io.legado.pack.sample.HelloDexEntry" }
     ],
     "commands": [
         { "name": "hello", "component": "main" },
         { "name": "echo", "component": "main" }
+    ],
+    "selfTests": [
+        { "name": "smoke", "command": "hello" }
     ]
 }

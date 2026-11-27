@@ -6,12 +6,15 @@
     "versionCode": 1,
     "packLib": ">=1.0.0 <2.0.0",
     "description": "Minimal native ABI-1 pack sample; build libhello_native.so from jni/ first",
-    "capabilities": [],
+    "capabilities": ["SELF_TEST"],
     "components": [
         { "id": "main", "type": "native", "path": "libhello_native.so", "abi": "arm64-v8a", "abiVersion": 1 }
     ],
     "commands": [
         { "name": "hello", "component": "main" },
         { "name": "echo", "component": "main" }
+    ],
+    "selfTests": [
+        { "name": "smoke", "command": "hello" }
     ]
 }
