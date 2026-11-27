@@ -67,7 +67,7 @@ class EffectiveReplacesDialog() : BaseDialogFragment(R.layout.dialog_recycler_vi
             recyclerView.adapter = adapter
         }
         val effectiveReplaceRules = if (sourceReplacement) {
-            appDb.replaceRuleDao.findByIds(*arguments!!.getLongArray("sourceRuleIds")!!)
+            appDb.replaceRuleDao.findByIds(*requireArguments().getLongArray("sourceRuleIds")!!)
         } else ReadBook.curTextChapter?.effectiveReplaceRules ?: emptyList()
         if (!sourceReplacement && AppConfig.chineseConverterType > 0) {
             adapter.setItems(effectiveReplaceRules + chineseConvert)

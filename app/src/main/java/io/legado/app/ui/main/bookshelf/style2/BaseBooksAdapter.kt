@@ -55,7 +55,7 @@ abstract class BaseBooksAdapter<VH : RecyclerView.ViewHolder>(
 
                 oldItem is BookshelfGroupItem && newItem is BookshelfGroupItem -> {
                     oldItem.group == newItem.group &&
-                            oldItem.coverSignature == newItem.coverSignature
+                            oldItem.coverSignatureEquals(newItem)
                 }
 
                 else -> false
@@ -108,6 +108,10 @@ abstract class BaseBooksAdapter<VH : RecyclerView.ViewHolder>(
             if (bundle.isEmpty) return null
             return bundle
         }
+    }
+
+    private fun BookshelfGroupItem.coverSignatureEquals(other: BookshelfGroupItem): Boolean {
+        return coverSignature == other.coverSignature
     }
 
     private val asyncListDiffer by lazy {

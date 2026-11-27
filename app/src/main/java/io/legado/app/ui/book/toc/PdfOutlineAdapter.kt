@@ -40,7 +40,10 @@ internal class PdfOutlineAdapter(
         tvChapterName.isSingleLine = false
         tvChapterName.maxLines = 2
         tvChapterName.ellipsize = TextUtils.TruncateAt.END
-        tvTag.text = node.pageIndex?.let { context.getString(R.string.pdf_outline_page, it + 1) }
+        tvTag.text = node.pageIndex?.let { pageIndex ->
+            val pageNumber: Int = pageIndex + 1
+            context.getString(R.string.pdf_outline_page, pageNumber)
+        }
         tvTag.visible(node.pageIndex != null)
         tvWordCount.gone()
         ivLocked.gone()

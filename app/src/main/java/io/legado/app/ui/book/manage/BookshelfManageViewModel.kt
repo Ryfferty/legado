@@ -188,8 +188,9 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
                     return@forEachIndexed
                 }
                 if (operationId == coverOperationId) {
+                    val progress: Int = index + 1
                     batchPersistCoverProcess.postValue(
-                        context.getString(R.string.persist_cover_progress, index + 1, books.size)
+                        context.getString(R.string.persist_cover_progress, progress, books.size)
                     )
                 }
                 val coverUrl = currentBook.networkCoverForPersistence()

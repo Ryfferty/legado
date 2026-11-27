@@ -1,8 +1,11 @@
 package io.legado.app.model
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import io.legado.app.R
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
@@ -13,6 +16,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.update
+import io.legado.app.lib.permission.Permissions
 import io.legado.app.model.jsSource.JsSourceEngine
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.webBook.WebBook
@@ -335,6 +339,14 @@ object AutoTaskProtocol {
         return try {
             val manager = NotificationManagerCompat.from(context)
             if (!manager.areNotificationsEnabled()) return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(
+                    context,
+                    Permissions.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return false
+            }
             manager.notify(id, notification)
             true
         } catch (error: RuntimeException) {
