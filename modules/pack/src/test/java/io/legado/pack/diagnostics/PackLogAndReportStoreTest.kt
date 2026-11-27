@@ -140,6 +140,51 @@ class PackLogAndReportStoreTest {
     }
 
     @Test
+    fun inMemoryRingsAreGloballyBoundedAndEvictTheOldestChannel() {
+        val root = temp.newFolder("packs")
+        val layout = PackStorageLayout(root)
+        val store = PackLogStore(layout, limits(), maxTotalMemoryBytes = 800)
+        val packA = PackId.require("ring-a")
+        val packB = PackId.require("ring-b")
+
+        repeat(30) { index -> store.log(packA, PackLogLevel.INFO, "a $index") }
+        val ringA = store.snapshot(packA, 2_000).size
+        assertTrue(ringA > 0)
+
+        repeat(30) { index -> store.log(packB, PackLogLevel.INFO, "b $index") }
+
+        // B's ring pressure evicts A's oldest lines; the accounting of A's
+        // disk log still matches the file (which the global disk budget may
+        // legitimately have truncated as well).
+        assertTrue(store.snapshot(packA, 2_000).size < ringA)
+        assertTrue(store.snapshot(packB, 2_000).isNotEmpty())
+        assertEquals(store.logFile(packA).length(), store.diskBytes(packA))
+    }
+
+    @Test
+    fun droppedLogLinesAreReportedAndReturnZeroPersistedBytes() {
+        val root = temp.newFolder("packs")
+        val layout = PackStorageLayout(root)
+        val failures = CopyOnWriteArrayList<PackDiagnostic>()
+        // Even the shortened line exceeds the per-pack budget, so the line is
+        // dropped instead of written.
+        val store = PackLogStore(
+            layout,
+            PackResourceLimits(maxLogBytesPerPack = 200, maxLogBytesTotal = 1_000),
+        ) { failures += it }
+        val pack = PackId.require("drop-pack")
+
+        val persisted = store.log(pack, PackLogLevel.INFO, "x".repeat(700))
+
+        // Nothing reached the disk and the drop is reported instead of
+        // staying silent; callers that track persisted bytes see zero.
+        assertEquals(0L, persisted)
+        assertTrue(failures.isNotEmpty())
+        assertEquals(PackErrorCode.IO_FAILED, failures.last().code)
+        assertEquals(0L, store.diskBytes(pack))
+    }
+
+    @Test
     fun structuredDiagnosticsAreBoundedAndRemovable() {
         val store = PackDiagnosticsStore(maxGlobalEvents = 10, maxPerPackEvents = 3)
         val ref = TestPacks.ref("diag-pack")
@@ -148,15 +193,39 @@ class PackLogAndReportStoreTest {
             requestId = "req",
             code = PackErrorCode.PERMISSION_DENIED,
             message = "denied token=abc",
+            path = "mcpTools.demo_add",
             details = mapOf("Authorization" to "Bearer xyz"),
         )
         store.recordDiagnostic(ref, null, PackDiagnostic(PackErrorCode.TIMEOUT, "timed out"))
         val events = store.snapshot(ref.id, 10)
         assertEquals(2, events.size)
         assertEquals(PackLogLevel.ERROR, events.first().level)
+        assertEquals("mcpTools.demo_add", events.first().path)
         assertFalse(events.joinToString { it.message + it.details }.contains("abc"))
         store.onPackRemoved(ref.id)
         assertTrue(store.snapshot(ref.id, 10).isEmpty())
+    }
+
+    @Test
+    fun diagnosticsSnapshotsAreDefensiveCopies() {
+        val store = PackDiagnosticsStore()
+        val ref = TestPacks.ref("diag-copy")
+        store.record(
+            packRef = ref,
+            requestId = "req",
+            code = PackErrorCode.IO_FAILED,
+            message = "copy me",
+            details = mapOf("key" to "value"),
+        )
+        val first = store.snapshot(ref.id, 10).single()
+        // Whatever the caller does to the returned event (a failing mutation
+        // on an immutable copy, or a successful one on a mutable copy), the
+        // stored event must stay intact.
+        runCatching {
+            @Suppress("UNCHECKED_CAST")
+            (first.details as MutableMap<String, String>)["key"] = "mutated"
+        }
+        assertEquals("value", store.snapshot(ref.id, 10).single().details["key"])
     }
 
     @Test
@@ -186,7 +255,7 @@ class PackLogAndReportStoreTest {
         assertEquals(2, store.recent(ref.id, 10).size)
         assertEquals("run-2", store.recent(ref.id, 1).single().runId)
 
-        val corrupt = File(File(layout.packDir(ref.id), "self-tests"), "run-3.json")
+        val corrupt = File(layout.selfTestDir(ref.id), "run-3.json")
         corrupt.writeText("not json")
         assertNull(store.load(ref.id, "run-3"))
         assertTrue(failures.isNotEmpty())

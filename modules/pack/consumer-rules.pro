@@ -14,3 +14,6 @@
 # Constructed by name from C++ (FindClass + ThrowNew) on native failures; the
 # Kotlin catch sites alone do not keep the class or its String constructor.
 -keep class io.legado.pack.runtime.nativebridge.NativeBridgeFailure { *; }
+# Resident subtype thrown by name from C++ (FindClass + ThrowNew) when a
+# mapped-but-failed library stays in the native registry until restart.
+-keep class io.legado.pack.runtime.nativebridge.NativeResidentFailure { *; }

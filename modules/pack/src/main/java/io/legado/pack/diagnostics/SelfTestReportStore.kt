@@ -275,7 +275,7 @@ class SelfTestReportStore(
         files.take(excess).forEach { it.delete() }
     }
 
-    private fun directory(id: PackId): File = File(layout.packDir(id), "self-tests")
+    private fun directory(id: PackId): File = layout.selfTestDir(id)
 
     companion object {
         private const val LATEST_FILE = "latest"

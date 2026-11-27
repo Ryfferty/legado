@@ -44,8 +44,14 @@ internal class RuntimeTestContext(source: String, capabilities: Set<PackCapabili
     override val crypto = object : PackCrypto {
         override fun digest(algorithm: String, data: ByteArray): ByteArray = java.security.MessageDigest.getInstance(algorithm).digest(data)
         override fun hmac(algorithm: String, key: ByteArray, data: ByteArray): ByteArray = error("unused")
-        override fun cipher(spec: String, key: ByteArray, iv: ByteArray?, data: ByteArray): ByteArray = error("unused")
+        override fun cipher(spec: String, key: ByteArray, iv: ByteArray?, data: ByteArray): ByteArray {
+            cipherCalls[spec] = iv to data
+            return data
+        }
     }
+
+    /** Recorded cryptoCipher calls: spec -> (iv, data). */
+    val cipherCalls = ConcurrentHashMap<String, Pair<ByteArray?, ByteArray>>()
     override val logger = object : PackLogger {
         override fun log(level: PackLogLevel, message: String, details: Map<String, String>) = Unit
     }

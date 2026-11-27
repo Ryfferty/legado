@@ -11,6 +11,23 @@ import java.security.MessageDigest
 internal fun runtimeFailure(code: PackErrorCode, message: String, cause: Throwable? = null): Nothing =
     throw PackException(PackDiagnostic(code, message), cause)
 
+/**
+ * Diagnostic detail key for a component load that failed AFTER the runtime
+ * mapped trusted code into this process (native dlopen succeeded, a later
+ * step failed; the mapping cannot be undone without a restart).
+ *
+ * The native JNI bridge signals this with its `NativeResidentFailure`
+ * exception type; the provider copies it into the diagnostic so the manager
+ * can turn it into a durable NEEDS_RESTART mark — a load failure leaves no
+ * closable [io.legado.pack.api.PackInstance], so without this mark the
+ * unload report would claim a clean release while the code is still mapped.
+ */
+internal const val DETAIL_RESIDENT_AFTER_FAILURE: String = "residentAfterFailure"
+
+/** True when a load-failure diagnostic describes code that is still mapped. */
+internal fun PackDiagnostic.isResidentLoadFailure(): Boolean =
+    details[DETAIL_RESIDENT_AFTER_FAILURE] == "true"
+
 internal fun verifyBinding(ref: PackRef, component: ComponentSpec, context: PackContext, call: PackCallContext) {
     call.checkActive()
     if (ref != context.ref || call.packRef != ref || context.manifest.componentById(component.id) != component) {

@@ -13,6 +13,18 @@ internal class ContextPrimitives(private val context: PackContext) : PackJsPrimi
         }
     }
 
+    /**
+     * HTTP admission, factored out so the JS bridge can run it before
+     * serializing the request: an undeclared network capability must fail
+     * before any codec limit can mask it. No network I/O is involved.
+     */
+    fun ensureHttpAdmitted() {
+        requireCapability(PackCapability.HTTP)
+        if (context.manifest.network == NetworkPolicy.None) {
+            runtimeFailure(PackErrorCode.PERMISSION_DENIED, "network is not declared")
+        }
+    }
+
     private fun key(key: String) {
         requireCapability(PackCapability.KV)
         if (key.length > context.limits.maxKvKeyChars) {
@@ -54,10 +66,7 @@ internal class ContextPrimitives(private val context: PackContext) : PackJsPrimi
     }
 
     override fun http(requestJson: String, call: PackCallContext): String {
-        requireCapability(PackCapability.HTTP)
-        if (context.manifest.network == NetworkPolicy.None) {
-            runtimeFailure(PackErrorCode.PERMISSION_DENIED, "network is not declared")
-        }
+        ensureHttpAdmitted()
         call.checkActive()
         val request = PackJsHttpJson.decodeRequest(requestJson)
         val limit = minOf(

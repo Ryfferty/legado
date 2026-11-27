@@ -16,6 +16,8 @@ internal class DeviceRuntimeContext(
     componentJson: String,
     private val resource: String,
     private val fixtureAsset: String,
+    /** Lets a test inject a different platform (e.g. a low sdkInt) without Build reads. */
+    platformOverride: PackPlatform? = null,
 ) : PackContext {
     override val manifest = (PackManifestParser().parseJson("""
         {"schemaVersion":1,"id":"runtime-device","name":"Runtime smoke","version":"1.0.0","versionCode":1,
@@ -23,7 +25,7 @@ internal class DeviceRuntimeContext(
          "commands":[{"name":"hello","component":"main"},{"name":"echo","component":"main"}]}
     """.trimIndent()) as ManifestParseResult.Valid).manifest
     override val ref = PackRef(manifest.id, RevisionId.require("b".repeat(64)), 1)
-    override val platform = PackPlatform(Build.VERSION.SDK_INT,
+    override val platform = platformOverride ?: PackPlatform(Build.VERSION.SDK_INT,
         Build.SUPPORTED_ABIS.mapNotNull(NativeAbi::parse).toSet(), Os.sysconf(OsConstants._SC_PAGESIZE).toInt())
     override val limits = PackResourceLimits()
     override val storage = object : PackStorage {

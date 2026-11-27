@@ -117,8 +117,20 @@ public class PackKeyValueStoreImpl(
                 if (file.name.endsWith("$SUFFIX.bak")) {
                     val target = File(file.parentFile, file.name.removeSuffix(".bak"))
                     if (!target.exists()) {
-                        file.renameTo(target)
+                        // Same contract as get()/AtomicFiles.recoverIfNeeded:
+                        // a backup that cannot be restored is an explicit
+                        // IO_FAILED failure for the whole listing. Returning
+                        // keys that get() cannot read back would silently
+                        // mask the broken recovery.
+                        if (!file.renameTo(target)) {
+                            throw AtomicFiles.ioFailure("cannot recover KV entry from backup", file)
+                        }
                         cachedTotalBytes = null
+                        // The directory listing predates the rename, so the
+                        // restored key must be surfaced here instead of being
+                        // dropped from this result until the next listing.
+                        val entry = readEntry(target, expectedKey = null)
+                        result += entry.first
                     }
                     return@forEach
                 }

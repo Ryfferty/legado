@@ -24,11 +24,14 @@ data class PackLogEntry(
  * Both budgets come from [PackResourceLimits]. There is no periodic task: the
  * in-memory ring is trimmed on append and the global disk budget is enforced by
  * truncating the least recently written pack logs when a new line would cross
- * the hard cap.
+ * the hard cap. The in-memory rings are additionally bounded globally
+ * ([maxTotalMemoryBytes]); pressure evicts the oldest lines of the channel
+ * holding the globally oldest entry.
  */
 class PackLogStore(
     private val layout: PackStorageLayout,
     private val limits: PackResourceLimits,
+    private val maxTotalMemoryBytes: Long = DEFAULT_MAX_TOTAL_MEMORY_BYTES,
     private val onStorageFailure: (PackDiagnostic) -> Unit = {},
 ) {
 
@@ -36,6 +39,12 @@ class PackLogStore(
     private val channels = LinkedHashMap<PackId, Channel>()
     private val globalBudget = minOf(limits.maxLogBytesTotal, PackResourceLimits.HARD_LOG_BUDGET_BYTES)
     private var totalBytes: Long = scanExistingBytes()
+
+    /** Sum of all in-memory ring estimates; guarded by [lock]. */
+    private var totalMemoryBytes: Long = 0L
+
+    /** Timestamp of the last dropped-line diagnostic; guarded by [lock]. */
+    private var lastDropReportEpochMs: Long = 0L
 
     fun log(
         id: PackId,
@@ -61,19 +70,28 @@ class PackLogStore(
         synchronized(lock) {
             val channel = channelFor(id)
             channel.entries.addLast(entry)
-            channel.memoryBytes += estimateMemory(entry)
+            val entryMemory = estimateMemory(entry)
+            channel.memoryBytes += entryMemory
+            totalMemoryBytes += entryMemory
             while (channel.entries.size > MaxEntriesPerPack ||
                 channel.memoryBytes > limits.maxLogBytesPerPack
             ) {
                 val removed = channel.entries.removeFirst()
-                channel.memoryBytes -= estimateMemory(removed)
+                val removedMemory = estimateMemory(removed)
+                channel.memoryBytes -= removedMemory
+                totalMemoryBytes -= removedMemory
                 if (channel.entries.isEmpty()) break
             }
+            trimGlobalMemoryLocked()
             if (lineBytes > limits.maxLogBytesPerPack || lineBytes > globalBudget) {
-                return lineBytes
+                reportDroppedLineLocked(id, "single line exceeds the per-pack/global budget")
+                // The in-memory ring still holds the entry; only the disk copy
+                // is dropped, so the persisted-byte count the caller tracks
+                // must report zero.
+                return 0L
             }
-            try {
-                writeLine(channel, line, lineBytes)
+            val written = try {
+                writeLine(id, channel, line, lineBytes)
             } catch (e: Exception) {
                 onStorageFailure(
                     PackDiagnostic(
@@ -82,8 +100,9 @@ class PackLogStore(
                         path = "logs/${id.value}",
                     ),
                 )
+                false
             }
-            return lineBytes
+            return if (written) lineBytes else 0L
         }
     }
 
@@ -112,6 +131,8 @@ class PackLogStore(
         synchronized(lock) {
             val removed = channels.remove(id)
             if (removed != null) {
+                totalMemoryBytes -= removed.memoryBytes
+                if (totalMemoryBytes < 0L) totalMemoryBytes = 0L
                 totalBytes -= removed.fileBytes
                 if (totalBytes < 0L) totalBytes = scanExistingBytes()
             }
@@ -131,18 +152,29 @@ class PackLogStore(
     private fun channelFor(id: PackId): Channel =
         channels.getOrPut(id) { Channel(logFile(id)) }
 
-    private fun writeLine(channel: Channel, line: String, lineBytes: Long) {
+    /**
+     * Appends one line, evicting other packs' files when budgets require it.
+     * Returns true only when the line reached the disk; a dropped line is
+     * reported through [onStorageFailure] so no failure path is silent.
+     */
+    private fun writeLine(id: PackId, channel: Channel, line: String, lineBytes: Long): Boolean {
         val directory = channel.file.parentFile
         if (directory != null && !directory.exists() && !directory.mkdirs() && !directory.isDirectory) {
             throw IllegalStateException("cannot create log directory ${directory.path}")
         }
         if (channel.fileBytes + lineBytes > limits.maxLogBytesPerPack) {
-            if (!resetChannelFile(channel)) return
+            if (!resetChannelFile(channel)) {
+                reportDroppedLineLocked(id, "cannot reset the per-pack log file to stay within its budget")
+                return false
+            }
         }
         if (totalBytes + lineBytes > globalBudget) {
             freeOtherLogs(channel.file, totalBytes + lineBytes - globalBudget)
             if (totalBytes + lineBytes > globalBudget) {
-                if (!resetChannelFile(channel) || totalBytes + lineBytes > globalBudget) return
+                if (!resetChannelFile(channel) || totalBytes + lineBytes > globalBudget) {
+                    reportDroppedLineLocked(id, "the global log budget could not be reclaimed for this line")
+                    return false
+                }
             }
         }
         FileOutputStream(channel.file, true).use { output ->
@@ -154,6 +186,43 @@ class PackLogStore(
         if (totalBytes > globalBudget) {
             totalBytes = globalBudget
         }
+        return true
+    }
+
+    /**
+     * Enforces the global in-memory ceiling by evicting the oldest line of
+     * the channel that holds the globally oldest entry.
+     */
+    private fun trimGlobalMemoryLocked() {
+        while (totalMemoryBytes > maxTotalMemoryBytes) {
+            val victim = channels.values
+                .filter { it.entries.isNotEmpty() }
+                .minByOrNull { it.entries.first().timestampEpochMs }
+                ?: return
+            val removed = victim.entries.removeFirst()
+            val removedMemory = estimateMemory(removed)
+            victim.memoryBytes -= removedMemory
+            totalMemoryBytes -= removedMemory
+        }
+    }
+
+    /**
+     * Reports a dropped log line through the diagnostics callback (not the
+     * log channel itself, so there is no recursion). Rate limited: a
+     * permanently over-budget store stays visible without flooding the
+     * diagnostics channel.
+     */
+    private fun reportDroppedLineLocked(id: PackId, reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastDropReportEpochMs < DropReportIntervalMs) return
+        lastDropReportEpochMs = now
+        onStorageFailure(
+            PackDiagnostic(
+                code = PackErrorCode.IO_FAILED,
+                message = "pack log line dropped: $reason",
+                path = "logs/${id.value}",
+            ),
+        )
     }
 
     private fun resetChannelFile(channel: Channel): Boolean {
@@ -288,5 +357,11 @@ class PackLogStore(
         private const val MaxDetails = 32
         private const val MaxDetailKeyChars = 128
         private const val MaxDetailValueChars = 1_024
+
+        /** Global in-memory ceiling for all ring buffers together. */
+        const val DEFAULT_MAX_TOTAL_MEMORY_BYTES: Long = 64L * 1024 * 1024
+
+        /** Minimum spacing between two dropped-line diagnostics. */
+        private const val DropReportIntervalMs = 1_000L
     }
 }

@@ -57,4 +57,11 @@ dependencies {
     implementation libs.gson
 
     testImplementation libs.junit
+
+    // Device (androidTest) runtime fixtures: DexRuntimeDeviceTest and
+    // NativeRuntimeDeviceTest need the runner/JUnit APIs on the androidTest
+    // classpath. Test-only; nothing here reaches the release AAR.
+    androidTestImplementation libs.androidx.junit
+    androidTestImplementation libs.androidx.runner
+    androidTestImplementation libs.junit
 }

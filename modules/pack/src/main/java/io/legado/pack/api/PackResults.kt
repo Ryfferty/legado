@@ -109,6 +109,8 @@ data class DiagnosticEvent(
     val code: PackErrorCode? = null,
     val packRef: PackRef? = null,
     val requestId: String? = null,
+    /** Where the failure happened, e.g. `mcpTools.demo_add` or `logs/<id>`. */
+    val path: String? = null,
     val details: Map<String, String> = emptyMap(),
 ) {
     init {

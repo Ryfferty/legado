@@ -78,11 +78,29 @@ struct Library {
 
 std::mutex registry_gate;
 std::unordered_map<jlong, std::shared_ptr<Library>> libraries;
+// Failure latch by staged path: a library that was mapped and then failed
+// keeps its registry entry until restart, so a retry must reuse that failure
+// instead of mapping the same file again under a new handle/name until the
+// 64-slot registry quota is exhausted.
+std::unordered_map<std::string, std::string> failed_paths;
 jlong next_handle = 1;
 
 void throw_java(JNIEnv *env, const std::string &message) {
     if (env->ExceptionCheck()) return;
     jclass type = env->FindClass("io/legado/pack/runtime/nativebridge/NativeBridgeFailure");
+    if (type) {
+        env->ThrowNew(type, message.c_str());
+        env->DeleteLocalRef(type);
+    }
+}
+
+// Post-mapping failure protocol: the library stays dlopen'ed in this process
+// (registry entry + per-path latch) until a restart, so Kotlin must see a
+// distinct exception type to record residency on the pack record instead of
+// reporting a clean release later.
+void throw_java_resident(JNIEnv *env, const std::string &message) {
+    if (env->ExceptionCheck()) return;
+    jclass type = env->FindClass("io/legado/pack/runtime/nativebridge/NativeResidentFailure");
     if (type) {
         env->ThrowNew(type, message.c_str());
         env->DeleteLocalRef(type);
@@ -336,10 +354,29 @@ Java_io_legado_pack_runtime_nativebridge_NativeBridge_open(JNIEnv *env, jobject,
         jint abi_version, jint sdk, jobject call, jobject logger, jint max_output) {
     std::shared_ptr<Library> library;
     jlong id = 0;
+    std::string path_key;
+    // Set when this open (or an earlier one for the same path) leaves a
+    // dlopen'ed library in the process; the catch handlers then throw the
+    // typed resident failure so Kotlin can record the residency.
+    bool stays_mapped = false;
     try {
         if (!path || !call || !logger || abi_version != PACK_NATIVE_ABI_VERSION || max_output <= 0 ||
             (mode != PACK_NATIVE_MODE_FILE && mode != PACK_NATIVE_MODE_MEMFD)) throw std::runtime_error("invalid native open parameters/ABI version");
         UtfChars private_path(env, path);
+        path_key = private_path.value;
+        {
+            // Failure latch: staged paths are content-addressed, so the same
+            // path means the same bytes. Reuse the recorded failure instead of
+            // mapping the library again.
+            std::lock_guard<std::mutex> lock(registry_gate);
+            auto prior = failed_paths.find(path_key);
+            if (prior != failed_paths.end()) {
+                // The mapping from the first failure is still alive, so the
+                // retry must carry the residency signal as well.
+                stays_mapped = true;
+                throw std::runtime_error("native library already failed for this path and stays resident; restart required. First failure: " + prior->second);
+            }
+        }
         FileOwner input(::open(private_path.value, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
         if (input.fd < 0) throw std::runtime_error(system_error("open private code"));
         struct stat facts{};
@@ -401,18 +438,42 @@ Java_io_legado_pack_runtime_nativebridge_NativeBridge_open(JNIEnv *env, jobject,
     } catch (const std::exception &error) {
         if (library && id) {
             if (library->dl) {
-                std::lock_guard<std::mutex> lock(library->gate);
-                library->failed = true;
+                {
+                    std::lock_guard<std::mutex> lock(library->gate);
+                    library->failed = true;
+                }
+                // Latch the failure for this path so retries reuse this entry
+                // instead of consuming another registry slot.
+                std::lock_guard<std::mutex> lock(registry_gate);
+                failed_paths[path_key] = error.what();
+                // dlopen succeeded before the failure, so the mapping (and
+                // this registry entry) is pinned until restart.
+                stays_mapped = true;
             } else {
                 std::lock_guard<std::mutex> lock(registry_gate);
                 libraries.erase(id);
             }
         }
-        throw_java(env, error.what());
+        if (stays_mapped) throw_java_resident(env, error.what());
+        else throw_java(env, error.what());
         return 0;
     } catch (...) {
-        if (library && id) { std::lock_guard<std::mutex> lock(library->gate); library->failed = true; }
-        throw_java(env, "native code threw across ABI boundary; restart required");
+        if (library && id) {
+            if (library->dl) {
+                {
+                    std::lock_guard<std::mutex> lock(library->gate);
+                    library->failed = true;
+                }
+                std::lock_guard<std::mutex> lock(registry_gate);
+                failed_paths[path_key] = "native code threw across the ABI boundary";
+                stays_mapped = true;
+            } else {
+                std::lock_guard<std::mutex> lock(registry_gate);
+                libraries.erase(id);
+            }
+        }
+        if (stays_mapped) throw_java_resident(env, "native code threw across ABI boundary; restart required");
+        else throw_java(env, "native code threw across ABI boundary; restart required");
         return 0;
     }
 }

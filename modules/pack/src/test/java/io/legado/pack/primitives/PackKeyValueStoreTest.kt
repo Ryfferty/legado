@@ -149,4 +149,73 @@ class PackKeyValueStoreTest {
         assertTrue(files.none { it.endsWith(".tmp") || it.endsWith(".bak") })
         assertFalse(files.isEmpty())
     }
+
+    @Test
+    fun keysRecoversBackupFilesInsteadOfDroppingThem() {
+        val root = temp.newFolder("packs")
+        val kv = store(root)
+        kv.put("alpha", "one")
+        kv.put("beta", "two")
+        val kvDir = File(File(root, "kv-pack"), "kv")
+        val files = kvDir.listFiles()?.filter { it.name.endsWith(".kv") } ?: emptyList()
+        check(files.size == 2) { "expected two KV entry files" }
+        // Simulate the crash window between the two renames of an atomic write.
+        check(files[0].renameTo(File(kvDir, files[0].name + ".bak")))
+
+        val keys = kv.keys()
+
+        // The recovered key must surface in the same listing, not silently
+        // vanish until the next call.
+        assertEquals(setOf("alpha", "beta"), keys)
+        assertEquals("one", kv.get("alpha"))
+        assertEquals("two", kv.get("beta"))
+    }
+
+    @Test
+    fun keysFailsClosedWhenBackupRecoveryFails() {
+        // Only platforms where an open handle blocks rename/delete can
+        // enforce the recovery-failure branch (Windows can; plain POSIX
+        // renames succeed while the file is open). Probe first and skip via
+        // an assumption instead of reporting a fake pass.
+        val probeRoot = temp.newFolder("probe")
+        val probe = File(probeRoot, "probe.bin")
+        probe.writeText("probe")
+        val probeStream = java.io.FileInputStream(probe)
+        val renameBlocked = !probe.renameTo(File(probeRoot, "probe-moved.bin"))
+        probeStream.close()
+        probe.delete()
+        File(probeRoot, "probe-moved.bin").delete()
+        org.junit.Assume.assumeTrue(
+            "this platform does not block renaming an open file; the recovery-failure branch is not enforceable here",
+            renameBlocked,
+        )
+
+        val root = temp.newFolder("packs")
+        val kv = store(root)
+        kv.put("alpha", "one")
+        kv.put("beta", "two")
+        val kvDir = File(File(root, "kv-pack"), "kv")
+        val files = kvDir.listFiles()?.filter { it.name.endsWith(".kv") } ?: emptyList()
+        check(files.size == 2) { "expected two KV entry files" }
+        // Crash window simulation: the entry only exists as its backup.
+        val backup = File(kvDir, files[0].name + ".bak")
+        check(files[0].renameTo(backup))
+
+        // Hold an open handle so the restore rename fails, then require the
+        // same fail-closed contract get() has via AtomicFiles.recoverIfNeeded:
+        // keys() must raise the IO red card instead of listing keys that
+        // get() could never read back.
+        val lock = java.io.FileInputStream(backup)
+        try {
+            try {
+                kv.keys()
+                fail("expected keys() to fail closed on the unrestorable backup")
+            } catch (e: PackException) {
+                assertEquals(PackErrorCode.IO_FAILED, e.diagnostic.code)
+                assertTrue(e.diagnostic.isRedCard)
+            }
+        } finally {
+            lock.close()
+        }
+    }
 }

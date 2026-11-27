@@ -6,7 +6,6 @@ import io.legado.pack.api.PackException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
 
 /**
  * File helpers for paths that must survive an interrupted write on a device
@@ -91,7 +90,12 @@ internal object AtomicFiles {
         if (file.exists()) return
         val backup = File(file.parentFile, file.name + ".bak")
         if (backup.isFile) {
-            backup.renameTo(file)
+            // A failed recovery must surface as an explicit IO failure; a
+            // silently skipped restore would later be misreported as a
+            // missing file / residual files instead.
+            if (!backup.renameTo(file)) {
+                throw ioFailure("cannot recover file from backup", backup)
+            }
         }
     }
 
@@ -191,39 +195,6 @@ internal object AtomicFiles {
             // A failed truncate is reported by the caller through remaining size.
         }
         return previous
-    }
-
-    fun copyBounded(input: InputStream, output: File, maxBytes: Long, path: String): Long {
-        var total = 0L
-        try {
-            FileOutputStream(output).use { out ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    total += read
-                    if (total > maxBytes) {
-                        throw PackException(
-                            PackDiagnostic(
-                                code = PackErrorCode.IMPORT_LIMIT_EXCEEDED,
-                                message = "entry '$path' exceeds $maxBytes bytes",
-                                path = path,
-                            ),
-                        )
-                    }
-                    out.write(buffer, 0, read)
-                }
-                out.flush()
-                out.fd.sync()
-            }
-        } catch (e: PackException) {
-            output.delete()
-            throw e
-        } catch (e: IOException) {
-            output.delete()
-            throw ioFailure("cannot write entry '$path': ${e.message}", output, e)
-        }
-        return total
     }
 
     fun ioFailure(message: String, file: File, cause: Throwable? = null): PackException =

@@ -66,6 +66,22 @@ class PackRegistryTest {
     }
 
     @Test
+    fun `reserved tool names are matched case-insensitively`() {
+        val registry = PackRegistry(reservedToolNames = setOf("demo_add"))
+
+        val result = registry.replaceAll(listOf(registration("pack-a", "DEMO_ADD")))
+
+        // The bridge layer already treats reserved names case-insensitively;
+        // the registry must reject the variant instead of admitting a tool
+        // that would never install.
+        assertTrue(result is RegistrationResult.Rejected)
+        assertEquals(
+            PackErrorCode.TOOL_CONFLICT,
+            (result as RegistrationResult.Rejected).diagnostics.first().code,
+        )
+    }
+
+    @Test
     fun `attach delivers the current snapshot and then later updates`() {
         val registry = PackRegistry()
         val seen = mutableListOf<PackRegistrationSnapshot>()

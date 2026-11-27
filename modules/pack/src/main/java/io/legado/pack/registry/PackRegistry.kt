@@ -8,6 +8,7 @@ import io.legado.pack.api.PackManifest
 import io.legado.pack.api.PackRef
 import io.legado.pack.api.PackRoutes
 import io.legado.pack.api.immutableMap
+import java.util.Locale
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -101,7 +102,12 @@ class PackRegistry(
     reservedToolNames: Set<String> = emptySet(),
 ) : AutoCloseable {
 
-    private val reservedToolNames: Set<String> = reservedToolNames.toSet()
+    // HostMcpToolNames declares that reservation is enforced
+    // case-insensitively and the MCP bridge already warns case-insensitively;
+    // the registry must reject the same variants so a case-variant tool can
+    // no longer pass admission and then never install.
+    private val reservedToolNamesLower: Set<String> =
+        reservedToolNames.mapTo(HashSet(reservedToolNames.size)) { it.lowercase(Locale.ROOT) }
     private val lock = ReentrantLock()
     private val sinks = LinkedHashMap<Long, PackRegistrationSink>()
     private var nextSinkId = 0L
@@ -209,7 +215,7 @@ class PackRegistry(
         val routeOwners = LinkedHashMap<String, PackId>()
         byId.values.sortedBy { it.ref.id.value }.forEach { registration ->
             registration.manifest.mcpTools.forEach { tool ->
-                if (tool.name in reservedToolNames) {
+                if (tool.name.lowercase(Locale.ROOT) in reservedToolNamesLower) {
                     diagnostics += PackDiagnostic(
                         code = PackErrorCode.TOOL_CONFLICT,
                         message = "tool '${tool.name}' is reserved by the host",

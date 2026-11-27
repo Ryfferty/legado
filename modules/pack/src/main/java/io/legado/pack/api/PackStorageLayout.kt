@@ -20,6 +20,7 @@ import java.io.File
  *   logs/
  *   cookies/
  *   opt/
+ *   self-tests/<runId>.json + latest
  * ```
  */
 class PackStorageLayout(
@@ -45,6 +46,13 @@ class PackStorageLayout(
     fun cookiesDir(id: PackId): File = File(packDir(id), "cookies")
 
     fun optDir(id: PackId): File = File(packDir(id), "opt")
+
+    /**
+     * Persisted self-test reports: one `<runId>.json` per run plus the `latest`
+     * pointer. This is the single source of that path; report stores must not
+     * hardcode the directory name.
+     */
+    fun selfTestDir(id: PackId): File = File(packDir(id), "self-tests")
 
     /** AtomicFile target that points at the immutable current revision metadata. */
     fun currentFile(id: PackId): File = File(packDir(id), "current.json")

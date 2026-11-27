@@ -57,10 +57,12 @@ import io.legado.pack.primitives.PackPrimitivesContext
 import io.legado.pack.registry.PackRegistration
 import io.legado.pack.registry.PackRegistry
 import io.legado.pack.registry.RegistrationResult
+import io.legado.pack.runtime.isResidentLoadFailure
 import io.legado.pack.storage.ContentHasher
 import io.legado.pack.storage.ManifestJsonCodec
 import io.legado.pack.storage.PackFormat
 import io.legado.pack.storage.PackHex
+import io.legado.pack.storage.PackInstallLedger
 import io.legado.pack.storage.PackImporter
 import io.legado.pack.storage.PackStore
 import io.legado.pack.storage.PreparedPack
@@ -118,6 +120,16 @@ class DefaultPackManager(
     private val store = PackStore(layout, validationContext)
     private val importer = PackImporter(layout, limits, validationContext)
 
+    /**
+     * Admission epochs stay monotonic across an uninstall/reinstall of the
+     * same pack id: host-side grant bookkeeping binds permissions to
+     * (id, revision, epoch, hash), and a reinstall that restarts at epoch 1
+     * would make a previously revoked grant match again after the revocation
+     * write failed. The high-water mark lives outside the pack directory and
+     * survives deletion; see [PackInstallLedger].
+     */
+    private val installLedger = PackInstallLedger(layout.packsRoot)
+
     private val stateLock = Any()
     private val persistLock = Any()
     private val mutationLock = ReentrantLock()
@@ -173,20 +185,54 @@ class DefaultPackManager(
             preExistingPack = existing != null,
         )
         val discarded = ArrayList<PreparedPack>()
+        var publishRejected = false
         val now = System.currentTimeMillis()
         synchronized(stateLock) {
-            previews[prepared.preview.token] = prepared
-            val iterator = previews.entries.iterator()
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                val expired = now - entry.value.createdAtEpochMs > PendingPreviewTtlMs
-                val overCapacity = previews.size > MaxPendingPreviews
-                if (!expired && !overCapacity) break
-                iterator.remove()
-                discarded += entry.value
+            // The closed check at the entry ran before the (long, unlocked)
+            // staging work; close() may have drained and returned since. The
+            // publication must re-validate under the same lock that close()
+            // clears the map with, otherwise a manager that is already closed
+            // would silently keep new staging alive.
+            if (closed) {
+                publishRejected = true
+                // Reclaim the preparation that completed after close instead
+                // of leaving its staging behind with no owner.
+                discarded += prepared
+            } else {
+                previews[prepared.preview.token] = prepared
+                val iterator = previews.entries.iterator()
+                while (iterator.hasNext()) {
+                    val entry = iterator.next()
+                    val expired = now - entry.value.createdAtEpochMs > PendingPreviewTtlMs
+                    val overCapacity = previews.size > MaxPendingPreviews
+                    if (!expired && !overCapacity) break
+                    iterator.remove()
+                    discarded += entry.value
+                }
             }
         }
-        discarded.forEach { importer.discard(it) }
+        discarded.forEach { evicted ->
+            // Evicted/closed preparations are background cleanup: a discard
+            // failure is reported as an IO red card instead of failing the
+            // fresh import that triggered the eviction (or being swallowed).
+            runCatching { importer.discard(evicted) }.onFailure { error ->
+                diagnosticsStore.record(
+                    null,
+                    null,
+                    PackErrorCode.IO_FAILED,
+                    "cannot discard import staging: ${error.message}",
+                    path = "staging/${evicted.preview.token}",
+                )
+            }
+        }
+        if (publishRejected) {
+            throw PackException(
+                PackDiagnostic(
+                    code = PackErrorCode.INTERNAL,
+                    message = "pack manager is closed",
+                ),
+            )
+        }
         prepared.preview
     }
 
@@ -219,13 +265,13 @@ class DefaultPackManager(
             ManifestJsonCodec.decode(prepared.manifestJson, validationContext)
         } catch (e: Exception) {
             synchronized(stateLock) { previews.remove(previewToken) }
-            importer.discard(prepared)
+            discardPreparedStaging(prepared)
             throw e
         }
         val id = manifest.id
         if (id != prepared.preview.manifest.id || manifest != prepared.preview.manifest) {
             synchronized(stateLock) { previews.remove(previewToken) }
-            importer.discard(prepared)
+            discardPreparedStaging(prepared)
             throw PackException(
                 PackDiagnostic(
                     code = PackErrorCode.MANIFEST_INVALID,
@@ -296,6 +342,16 @@ class DefaultPackManager(
         var published = false
         try {
             store.ensurePackDirectories(id)
+            // Reserve the admission epoch before any content is moved. The
+            // ledger's per-pack high-water mark lives outside the pack
+            // directory, so an uninstall followed by a reinstall of identical
+            // content cannot fall back to a previously used epoch and make
+            // host-side grant bookkeeping match a revoked entry again.
+            val nextEpoch = maxOf(
+                oldStored?.epoch ?: 0L,
+                installLedger.highestEpoch(id),
+            ) + 1L
+            installLedger.reserve(id, nextEpoch)
             if (current?.stored?.revision == revision && store.revisionExists(id, revision)) {
                 val installedDigest = ContentHasher.digestDirectory(store.revisionDir(id, revision))
                 if (installedDigest != revision) {
@@ -317,7 +373,7 @@ class DefaultPackManager(
                 manifestJson = prepared.manifestJson,
                 revision = revision,
                 contentSha256 = revision,
-                epoch = (oldStored?.epoch ?: 0L) + 1L,
+                epoch = nextEpoch,
                 enabled = oldStored?.enabled ?: true,
                 installedAtEpochMs = oldStored?.installedAtEpochMs ?: now,
                 needsRestart = false,
@@ -348,6 +404,11 @@ class DefaultPackManager(
                     records[id] = PackRecord(stored)
                 } else {
                     current!!.stored = stored
+                    // The new epoch was already written to current.json above;
+                    // bump the snapshot generation so a markBroken/markHealthy
+                    // snapshot taken before this replacement is recognized as
+                    // stale even though it may carry the same epoch.
+                    current!!.persistSeq += 1L
                     current!!.runtimeBroken = null
                     current!!.runtimeNeedsRestart = false
                     current!!.scope = null
@@ -394,7 +455,10 @@ class DefaultPackManager(
                     )
                 }
                 synchronized(stateLock) { current!!.transition = false }
-                synchronized(stateLock) { records[id]?.let { persistRecord(it) } }
+                // Persist outside stateLock: persistMetadata re-validates the
+                // epoch under persistLock and must never be nested inside
+                // stateLock (which would invert the lock order).
+                synchronized(stateLock) { records[id] }?.let { persistRecord(it) }
             }
             return synchronized(stateLock) { records[id]!!.toInfo() }
         } catch (e: Exception) {
@@ -433,7 +497,27 @@ class DefaultPackManager(
             )
         }
         synchronized(stateLock) { current?.transition = false }
-        importer.discard(prepared)
+        // The rollback's own IO failure must not mask the original commit
+        // error: a failed staging discard is reported as its own red card.
+        discardPreparedStaging(prepared)
+    }
+
+    /**
+     * Discards a preview's staging with a typed failure contract: residue
+     * left behind by a failed delete is reported as an IO red card diagnostic
+     * instead of being swallowed (AtomicFiles.deleteRecursively reports
+     * residue through its Boolean, not through an exception).
+     */
+    private fun discardPreparedStaging(prepared: PreparedPack) {
+        runCatching { importer.discard(prepared) }.onFailure { error ->
+            diagnosticsStore.record(
+                null,
+                null,
+                PackErrorCode.IO_FAILED,
+                "cannot discard import staging: ${error.message}",
+                path = "staging/${prepared.preview.token}",
+            )
+        }
     }
 
     // ------------------------------------------------------------------
@@ -486,6 +570,15 @@ class DefaultPackManager(
             return failure(requestId, code, "stored grant no longer matches the manifest", startNanos)
         }
         val newStored = oldStored.copy(enabled = true, epoch = oldStored.epoch + 1L)
+        // The new epoch is the identity host-side grants bind to, so it must
+        // reach the durable ledger before it becomes visible: a reinstall
+        // after an uninstall must never land on an epoch a previous enable
+        // already used for authorization.
+        try {
+            installLedger.reserve(id, newStored.epoch)
+        } catch (e: PackException) {
+            return failure(requestId, IO_FAILED, "cannot persist the admission epoch: ${e.diagnostic.message}", startNanos)
+        }
         synchronized(stateLock) {
             record.stored = newStored
             record.transition = true
@@ -529,6 +622,13 @@ class DefaultPackManager(
             if (record.transition) return failure(requestId, INVALID_REQUEST, "pack is being updated", startNanos)
         }
         val newStored = oldStored.copy(enabled = false, epoch = oldStored.epoch + 1L)
+        // Same contract as enable: the disable epoch must be durable before it
+        // is used, otherwise a reinstall could reuse it after an uninstall.
+        try {
+            installLedger.reserve(id, newStored.epoch)
+        } catch (e: PackException) {
+            return failure(requestId, IO_FAILED, "cannot persist the admission epoch: ${e.diagnostic.message}", startNanos)
+        }
         synchronized(stateLock) {
             record.stored = newStored
             record.transition = true
@@ -551,13 +651,17 @@ class DefaultPackManager(
         }
         val worker = synchronized(stateLock) { record.worker }
         val scope = synchronized(stateLock) { record.scope }
+        // A load that failed after mapping trusted code set this mark; no
+        // instance exists to close, so the close outcome alone would claim a
+        // clean release while the code is still resident.
+        val residentLoadMarked = synchronized(stateLock) { record.runtimeNeedsRestart }
         val drained = worker?.awaitIdle(executionPolicy.closeTimeoutMs) ?: true
         val closeOutcome = if (drained) {
             closeRuntimeScope(id, scope, worker)
         } else {
             CloseSummary.resident("pack calls did not stop within ${executionPolicy.closeTimeoutMs} ms")
         }
-        var needsRestart = !drained || !closeOutcome.released || closeOutcome.needsRestart
+        var needsRestart = !drained || !closeOutcome.released || closeOutcome.needsRestart || residentLoadMarked
         if (closeOutcome.released) {
             synchronized(stateLock) { record.scope = null }
         }
@@ -643,7 +747,12 @@ class DefaultPackManager(
                 sinkFailure = applied.sinkFailures.firstOrNull()
             }
             val residual = store.deletePack(id)
-            logStore.onPackRemoved(id)
+            // Decrement the log budget only after the pack's files are really
+            // gone; PackLogStore.onPackRemoved subtracts unconditionally and
+            // would under-report while residual files keep the log on disk.
+            if (residual.isEmpty()) {
+                logStore.onPackRemoved(id)
+            }
             diagnosticsStore.onPackRemoved(id)
             return UninstallReport(
                 packId = id,
@@ -680,6 +789,25 @@ class DefaultPackManager(
         }
         val oldStored = synchronized(stateLock) { record.stored }
         val disabled = oldStored.copy(enabled = false, epoch = oldStored.epoch + 1L)
+        // The final epoch increment must be durable BEFORE the pack content is
+        // deleted: an uninstall whose ledger write fails aborts with the pack
+        // intact instead of allowing a later reinstall to reuse an epoch that
+        // already authorized host-side grants.
+        try {
+            installLedger.reserve(id, disabled.epoch)
+        } catch (e: PackException) {
+            return UninstallReport(
+                packId = id,
+                registrationRevoked = false,
+                residualPaths = emptyList(),
+                loadedCodeStillResident = false,
+                needsRestart = false,
+                failure = PackDiagnostic(
+                    code = PackErrorCode.IO_FAILED,
+                    message = "cannot persist the admission epoch: ${e.diagnostic.message}",
+                ),
+            )
+        }
         synchronized(stateLock) {
             record.stored = disabled
             record.transition = true
@@ -718,20 +846,28 @@ class DefaultPackManager(
         }
         val worker = synchronized(stateLock) { record.worker }
         val scope = synchronized(stateLock) { record.scope }
+        // A load that failed after mapping trusted code (e.g. native dlopen
+        // succeeded and a later step failed) set this mark: no instance was
+        // registered, so closeRuntimeScope cannot see the residency and would
+        // report a clean release. The mark is the only durable witness.
+        val residentLoadMarked = synchronized(stateLock) { record.runtimeNeedsRestart }
         val drained = worker?.awaitIdle(executionPolicy.closeTimeoutMs) ?: true
         val closeOutcome = if (drained) {
             closeRuntimeScope(id, scope, worker)
         } else {
             CloseSummary.resident("pack calls did not stop within ${executionPolicy.closeTimeoutMs} ms")
         }
-        if (worker != null) {
-            worker.shutdownBounded(executionPolicy.closeTimeoutMs)
-        }
+        // Aligned with disablePack: a worker that did not stop within the
+        // budget keeps the process marked for restart instead of letting the
+        // uninstall report claim a clean state.
+        val workerStopped = worker?.shutdownBounded(executionPolicy.closeTimeoutMs) ?: true
         val residual = store.deletePack(id)
-        logStore.onPackRemoved(id)
+        if (residual.isEmpty()) {
+            logStore.onPackRemoved(id)
+        }
         diagnosticsStore.onPackRemoved(id)
-        val loadedResident = !drained || !closeOutcome.released
-        val needsRestart = loadedResident || closeOutcome.needsRestart
+        val loadedResident = !drained || !closeOutcome.released || residentLoadMarked
+        val needsRestart = loadedResident || closeOutcome.needsRestart || !workerStopped
         val failure = when {
             residual.isNotEmpty() -> PackDiagnostic(
                 code = PackErrorCode.RESIDUAL_FILES,
@@ -740,6 +876,12 @@ class DefaultPackManager(
             )
 
             closeOutcome.failure != null -> closeOutcome.failure!!
+            residentLoadMarked -> PackDiagnostic(
+                code = PackErrorCode.NEEDS_RESTART,
+                message = "pack code from a failed load remains mapped in this process; restart required",
+                path = id.value,
+            )
+
             registrationFailure != null -> registrationFailure
             sinkFailure != null -> sinkFailure
             else -> null
@@ -753,7 +895,7 @@ class DefaultPackManager(
                 runtimeBroken = record.runtimeBroken,
             )
             synchronized(stateLock) { records[id] = retained }
-            persistMetadata(retained.persisted())
+            persistRecord(retained)
         }
         return UninstallReport(
             packId = id,
@@ -776,8 +918,23 @@ class DefaultPackManager(
         caller: PackCaller,
         timeoutMs: Long?,
         cancellation: CancellationSignal,
-    ): PackResult = withContext(Dispatchers.IO) {
-        invokeDirect(id, command, argJson, caller, timeoutMs, cancellation)
+    ): PackResult {
+        // The worker-thread guard must run before the dispatch hop: inside
+        // withContext(Dispatchers.IO) the thread belongs to the IO pool, so
+        // invokeDirect's name-based check is vacuously false there.
+        if (isOnOwnWorker(id)) {
+            return PackResult.failure(
+                newRequestId(),
+                PackDiagnostic(
+                    code = PackErrorCode.INTERNAL,
+                    message = "blocking pack invocation cannot run on its own pack worker",
+                ),
+                0L,
+            )
+        }
+        return withContext(Dispatchers.IO) {
+            invokeDirect(id, command, argJson, caller, timeoutMs, cancellation)
+        }
     }
 
     override fun invokeBlocking(
@@ -834,8 +991,20 @@ class DefaultPackManager(
         }
     }
 
-    override suspend fun invoke(invocation: PackInvocation): PackResult =
-        withContext(Dispatchers.IO) {
+    override suspend fun invoke(invocation: PackInvocation): PackResult {
+        // Same guard as the other entry points, again before the dispatch hop:
+        // a pack worker must not block waiting for its own queue.
+        if (isOnOwnWorker(invocation.expectedRef.id)) {
+            return PackResult.failure(
+                newRequestId(),
+                PackDiagnostic(
+                    code = PackErrorCode.INTERNAL,
+                    message = "blocking pack invocation cannot run on its own pack worker",
+                ),
+                0L,
+            )
+        }
+        return withContext(Dispatchers.IO) {
             val admission = admit(
                 id = invocation.expectedRef.id,
                 expectedRef = invocation.expectedRef,
@@ -854,6 +1023,7 @@ class DefaultPackManager(
                 is Admission.Ready -> executePlanBlocking(admission.plan)
             }
         }
+    }
 
     override fun invokeBlocking(invocation: PackInvocation): PackResult {
         if (isOnOwnWorker(invocation.expectedRef.id)) {
@@ -1065,12 +1235,19 @@ class DefaultPackManager(
                 } else {
                     val tool = manifest.mcpTools.firstOrNull { it.name == entry.name }
                         ?: return EntryResolution.Failure(commandNotFound("mcp tool '${entry.name}'"))
-                    val granted = grant.permitsTool(tool.name) ||
-                        (tool.isWrite && dynamicWriteToolGrant?.invoke(
-                            ref,
-                            manifest,
-                            tool.name,
-                        ) == true)
+                    // Write tools follow the host's dynamic grant whenever one
+                    // is installed: an explicit dynamic false rejects the call
+                    // even when the static import grant contained the tool.
+                    // This mirrors the first-layer check in PackMcpBridge, so
+                    // manager admission and the host UI agree. Read tools and
+                    // hosts without a dynamic authority keep using the static
+                    // grant.
+                    val dynamicGrant = dynamicWriteToolGrant
+                    val granted = if (tool.isWrite && dynamicGrant != null) {
+                        dynamicGrant.invoke(ref, manifest, tool.name)
+                    } else {
+                        grant.permitsTool(tool.name)
+                    }
                     if (!granted) {
                         EntryResolution.Failure(
                             permissionDenied("MCP tool '${tool.name}' is not granted to this pack"),
@@ -1437,6 +1614,22 @@ class DefaultPackManager(
         val instance = try {
             provider.load(ref, component, scope.primitives, call)
         } catch (e: PackException) {
+            // A load that failed after mapping trusted code (native dlopen
+            // succeeded, a later step failed) leaves no closable instance, so
+            // closeRuntimeScope would otherwise report a clean release. Mark
+            // the pack NEEDS_RESTART durably; disable/uninstall fold this
+            // mark into their residency reporting.
+            if (e.diagnostic.isResidentLoadFailure()) {
+                markNeedsRestart(
+                    record.id,
+                    ref,
+                    PackDiagnostic(
+                        code = PackErrorCode.NEEDS_RESTART,
+                        message = "component '${component.id}' failed to load but its code remains mapped in this process; restart required",
+                        path = "components/${component.id}",
+                    ),
+                )
+            }
             throw e
         } catch (e: Exception) {
             throw PackException(
@@ -1796,6 +1989,25 @@ class DefaultPackManager(
         mutationLock.withLock {
             if (closed) return
             closed = true
+            // Uncommitted staging is discarded now (same discard path as
+            // prepareImport eviction) instead of waiting for the next
+            // construction's scanAndRecover to reclaim it.
+            val pendingPreviews = synchronized(stateLock) {
+                val pending = previews.values.toList()
+                previews.clear()
+                pending
+            }
+            pendingPreviews.forEach { prepared ->
+                runCatching { importer.discard(prepared) }.onFailure { error ->
+                    diagnosticsStore.record(
+                        null,
+                        null,
+                        PackErrorCode.IO_FAILED,
+                        "cannot discard pending import staging during close: ${error.message}",
+                        path = "staging/${prepared.preview.token}",
+                    )
+                }
+            }
             val snapshot = synchronized(stateLock) { records.values.toList() }
             snapshot.forEach { cancelActiveCalls(it.id, null) }
             snapshot.forEach { record ->
@@ -1836,6 +2048,13 @@ class DefaultPackManager(
         recovery.packs.forEach { stored ->
             var fixed = stored
             var runtimeBroken = stored.broken
+            // Migration for installations that predate the durable ledger (no
+            // .epochs.json on disk): raise the high-water mark to the stored
+            // epoch before the pack can be uninstalled, so a reinstall of the
+            // same content cannot fall back onto an epoch this installation
+            // already used for host-side grant binding. A failed migration
+            // fails closed (constructor) instead of restarting the numbering.
+            installLedger.reserve(fixed.id, fixed.epoch)
             if (!stored.grantMatchesPermissions ||
                 (stored.enabled && !stored.grant.approves(stored.manifest.permissions))
             ) {
@@ -1853,7 +2072,7 @@ class DefaultPackManager(
             )
             records[fixed.id] = record
             if (fixed != stored) {
-                persistMetadata(record.persisted())
+                persistRecord(record)
             }
         }
         publishInitialRegistrations()
@@ -2100,57 +2319,83 @@ class DefaultPackManager(
     }
 
     private fun markBroken(id: PackId, ref: PackRef, diagnostic: PackDiagnostic) {
-        val snapshot = synchronized(stateLock) {
-            val record = records[id]
-            if (record == null || record.ref != ref) return
+        val captured = synchronized(stateLock) {
+            val record = records[id]?.takeIf { it.ref == ref } ?: return
             if (record.runtimeBroken == diagnostic) return
             record.runtimeBroken = diagnostic
-            record.persisted()
+            record.persisted() to record.persistSeq
         }
-        persistMetadata(snapshot)
+        persistMetadata(captured.first, captured.second)
         diagnosticsStore.recordDiagnostic(ref, null, diagnostic)
     }
 
     private fun markHealthy(id: PackId, ref: PackRef) {
-        val changed = synchronized(stateLock) {
-            val record = records[id]
-            if (record == null || record.ref != ref || record.runtimeBroken == null) return
+        val captured = synchronized(stateLock) {
+            val record = records[id]?.takeIf { it.ref == ref } ?: return
+            if (record.runtimeBroken == null) return
             record.runtimeBroken = null
-            record.persisted()
+            record.persisted() to record.persistSeq
         }
-        persistMetadata(changed)
+        persistMetadata(captured.first, captured.second)
     }
 
     private fun markNeedsRestart(id: PackId, ref: PackRef, diagnostic: PackDiagnostic) {
-        val snapshot = synchronized(stateLock) {
-            val record = records[id]
-            if (record == null || record.ref != ref) return
+        val captured = synchronized(stateLock) {
+            val record = records[id]?.takeIf { it.ref == ref } ?: return
             record.runtimeNeedsRestart = true
-            record.persisted()
+            record.persisted() to record.persistSeq
         }
-        persistMetadata(snapshot)
+        persistMetadata(captured.first, captured.second)
         diagnosticsStore.recordDiagnostic(ref, null, diagnostic)
     }
 
     private fun persistRecord(record: PackRecord): Boolean {
-        val snapshot = synchronized(stateLock) { record.persisted() }
-        return persistMetadata(snapshot)
+        val captured = synchronized(stateLock) { record.persisted() to record.persistSeq }
+        return persistMetadata(captured.first, captured.second)
     }
 
-    private fun persistMetadata(stored: StoredPack): Boolean {
-        return try {
-            synchronized(persistLock) { store.writeMetadata(stored) }
-            true
-        } catch (e: Exception) {
-            diagnosticsStore.record(
-                stored.ref,
-                null,
-                PackErrorCode.IO_FAILED,
-                "cannot persist pack metadata: ${e.message}",
-                path = "current.json",
-            )
-            false
+    /**
+     * Writes one record snapshot to `current.json` under the persist lock.
+     *
+     * Visible for the persistence-ordering white-box test only; production
+     * callers go through [persistRecord] / the mark* helpers.
+     *
+     * Ordering guard: deliver-side markBroken/markHealthy run on their
+     * callers' coroutines, so two snapshots of the same epoch can reach this
+     * lock in reverse snapshot order (the older one persisted last). A
+     * generation older than the live record — or an epoch below the live
+     * epoch, which covers snapshots taken before a commit replacement — must
+     * not reach the file; its state is superseded by the newer snapshot
+     * derived from the same mutable record, so skipping it can only leave the
+     * file at a state that the newer snapshot already wrote or will write.
+     * A skipped write is not a failure: the lifecycle flows that roll back on
+     * `false` must not revert an in-memory state that a newer snapshot has
+     * already persisted. A record that no longer exists (uninstalled) also
+     * skips: writing would resurrect metadata for a deleted pack.
+     */
+    internal fun persistMetadata(stored: StoredPack, seq: Long): Boolean {
+        synchronized(persistLock) {
+            val live = synchronized(stateLock) { records[stored.id] }
+            if (live == null ||
+                live.persistSeq > seq ||
+                stored.epoch < live.stored.epoch
+            ) {
+                return true
+            }
+            try {
+                store.writeMetadata(stored)
+            } catch (e: Exception) {
+                diagnosticsStore.record(
+                    stored.ref,
+                    null,
+                    PackErrorCode.IO_FAILED,
+                    "cannot persist pack metadata: ${e.message}",
+                    path = "current.json",
+                )
+                return false
+            }
         }
+        return true
     }
 
     private fun ensureOpen() {

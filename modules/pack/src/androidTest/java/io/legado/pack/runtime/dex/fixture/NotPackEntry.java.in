@@ -1,0 +1,30 @@
+// Template input for a separate javac + D8 fixture task. Do not compile this
+// into the host/test APK classpath: only the resulting DEX is an androidTest asset.
+package io.legado.pack.fixture;
+
+/**
+ * Negative fixture for DexRuntimeDeviceTest: a class that does NOT implement
+ * the host PackEntry interface. The static initializer deliberately throws so
+ * the test also proves the provider rejects the class before any static
+ * initialization runs (loadClass/Class.forName(false) + assignability check).
+ */
+public final class NotPackEntry {
+    static {
+        if (true) {
+            throw new IllegalStateException("NotPackEntry must never be initialized");
+        }
+    }
+
+    private boolean initialized;
+
+    public NotPackEntry() { }
+
+    public void initialize() {
+        initialized = true;
+    }
+
+    public String invoke(String command, String argJson) {
+        if (!initialized) throw new IllegalStateException("not initialized");
+        return argJson;
+    }
+}

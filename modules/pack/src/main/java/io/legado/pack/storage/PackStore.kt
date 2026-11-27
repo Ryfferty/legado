@@ -244,9 +244,16 @@ internal class PackStore(
             } catch (_: Exception) {
                 throw first
             }
+            // The restore itself must not fail silently: returning `recovered`
+            // while current.json is still missing would surface later as a
+            // bogus RESIDUAL_FILES / missing-metadata report.
             current.setWritable(true, false)
-            current.delete()
-            backup.renameTo(current)
+            if (current.exists() && !current.delete()) {
+                throw AtomicFiles.ioFailure("cannot remove damaged installation metadata", current)
+            }
+            if (!backup.renameTo(current)) {
+                throw AtomicFiles.ioFailure("cannot restore installation metadata from backup", backup)
+            }
             recovered
         }
     }
@@ -427,17 +434,6 @@ internal class PackStore(
             stagingRoot.listFiles()?.forEach { AtomicFiles.deleteRecursively(it) }
         }
     }
-
-    fun cleanupAllStaging() {
-        cleanupIncoming(mutableListOf())
-        packsRoot.listFiles()?.forEach { child ->
-            if (child.isDirectory && !child.name.startsWith(".")) {
-                PackId.parse(child.name)?.let { cleanupStaging(it) }
-            }
-        }
-    }
-
-    fun selfTestDir(id: PackId): File = File(layout.packDir(id), "self-tests")
 
     private fun decodeCurrent(file: File): StoredPack {
         val text = AtomicFiles.readText(file, MAX_CURRENT_BYTES, file.name)

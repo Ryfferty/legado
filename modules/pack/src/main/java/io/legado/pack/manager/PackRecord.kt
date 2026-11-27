@@ -31,6 +31,16 @@ internal class PackRecord(
     var scope: PackRuntimeScope? = null,
     var worker: PackWorker? = null,
     var metrics: PackMetricsTracker = PackMetricsTracker(),
+    /**
+     * Monotonic generation of the state snapshots handed to the persistence
+     * path. Every [persisted] call under the manager's state lock yields a
+     * strictly newer generation, so the manager's metadata writer can refuse
+     * a stale snapshot even when its epoch equals the live record's epoch:
+     * markBroken and markHealthy run on their callers' coroutines, and two
+     * same-epoch snapshots can otherwise reach `current.json` in reverse
+     * snapshot order and roll a newer state back on disk.
+     */
+    var persistSeq: Long = 0L,
 ) {
     val id: PackId get() = stored.id
     val manifest: PackManifest get() = stored.manifest
@@ -51,8 +61,12 @@ internal class PackRecord(
         installedAtEpochMs = stored.installedAtEpochMs,
     )
 
-    fun persisted(): StoredPack = stored.copy(
-        needsRestart = runtimeNeedsRestart,
-        broken = runtimeBroken,
-    )
+    /** Must be called under the manager's state lock: bumps the generation. */
+    fun persisted(): StoredPack {
+        persistSeq += 1L
+        return stored.copy(
+            needsRestart = runtimeNeedsRestart,
+            broken = runtimeBroken,
+        )
+    }
 }

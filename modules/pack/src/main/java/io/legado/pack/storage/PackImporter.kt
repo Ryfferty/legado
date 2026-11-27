@@ -131,8 +131,35 @@ internal class PackImporter(
         return computed
     }
 
+    /**
+     * Removes a preview's staging. Failure is typed, not silent: when the
+     * staging directory cannot be fully deleted the residue is reported as an
+     * IO_FAILED exception (AtomicFiles.deleteRecursively signals residue via
+     * its Boolean return, not via an exception), so callers such as manager
+     * close() can surface the red card instead of leaving orphaned files.
+     *
+     * The same contract covers the empty pack skeleton: a rmdir that fails
+     * while the directory is genuinely empty (open handle/permission) is an
+     * IO red card, while content that legitimately appeared after the
+     * emptiness checks (another preview's token, a rogue writer) keeps the
+     * skeleton in place silently.
+     */
     fun discard(prepared: PreparedPack) {
-        AtomicFiles.deleteRecursively(prepared.stagingDir)
+        val staging = prepared.stagingDir
+        if (staging.exists() && !AtomicFiles.deleteRecursively(staging)) {
+            val residual = AtomicFiles.residualPaths(staging)
+            throw PackException(
+                PackDiagnostic(
+                    code = PackErrorCode.IO_FAILED,
+                    message = "cannot discard import staging; ${residual.size} entries remain",
+                    path = "staging/${prepared.preview.token}",
+                    details = mapOf(
+                        "residualCount" to residual.size.toString(),
+                        "residual" to residual.take(ResidualDetailLimit).joinToString(","),
+                    ),
+                ),
+            )
+        }
         if (!prepared.preExistingPack) {
             cleanupEmptyPackDir(prepared.preview.manifest.id)
         }
@@ -158,10 +185,8 @@ internal class PackImporter(
             is ManifestParseResult.Valid -> parsed.manifest
             is ManifestParseResult.Invalid -> throw PackException(parsed.diagnostics.first())
         }
-        val warnings = when (parsed) {
-            is ManifestParseResult.Valid -> parsed.warnings
-            is ManifestParseResult.Invalid -> emptyList()
-        }
+        // The when above throws on Invalid, so `parsed` is Valid here.
+        val warnings = parsed.warnings
         val staging = createStagingDir(manifest.id, token)
         try {
             PackZipArchive.extract(archive, entries, staging, limits, checkCancelled)
@@ -176,7 +201,7 @@ internal class PackImporter(
             )
         } catch (e: Exception) {
             AtomicFiles.deleteRecursively(staging)
-            cleanupEmptyPackDir(manifest.id)
+            cleanupEmptyPackDirBestEffort(manifest.id)
             throw e
         }
     }
@@ -204,20 +229,15 @@ internal class PackImporter(
             is ManifestParseResult.Valid -> parsed.manifest
             is ManifestParseResult.Invalid -> throw PackException(parsed.diagnostics.first())
         }
-        val body = when (parsed) {
-            is ManifestParseResult.Valid -> parsed.singleFileBody
-            is ManifestParseResult.Invalid -> null
-        } ?: throw PackException(
+        // The when above throws on Invalid, so `parsed` is Valid here.
+        val body = parsed.singleFileBody ?: throw PackException(
             PackDiagnostic(
                 code = PackErrorCode.MANIFEST_INVALID,
                 message = "single-file pack has no JavaScript body",
                 path = PackArchiveSpec.SINGLE_FILE_JS_ENTRY,
             ),
         )
-        val warnings = when (parsed) {
-            is ManifestParseResult.Valid -> parsed.warnings
-            is ManifestParseResult.Invalid -> emptyList()
-        }
+        val warnings = parsed.warnings
         val staging = createStagingDir(manifest.id, token)
         try {
             val main = File(staging, PackArchiveSpec.SINGLE_FILE_JS_ENTRY)
@@ -234,7 +254,7 @@ internal class PackImporter(
             )
         } catch (e: Exception) {
             AtomicFiles.deleteRecursively(staging)
-            cleanupEmptyPackDir(manifest.id)
+            cleanupEmptyPackDirBestEffort(manifest.id)
             throw e
         }
     }
@@ -337,22 +357,103 @@ internal class PackImporter(
 
     private fun cleanupStaging(id: io.legado.pack.api.PackId?, staging: File?) {
         staging?.let { AtomicFiles.deleteRecursively(it) }
-        id?.let { cleanupEmptyPackDir(it) }
+        id?.let { cleanupEmptyPackDirBestEffort(it) }
     }
 
+    /**
+     * Failure-path variant of [cleanupEmptyPackDir]: the original import error
+     * must remain the reported one, so a skeleton-reclaim failure during error
+     * cleanup is not allowed to mask it. The residue stays on disk for the
+     * next discard or the startup scan to report.
+     */
+    private fun cleanupEmptyPackDirBestEffort(id: io.legado.pack.api.PackId) {
+        runCatching { cleanupEmptyPackDir(id) }
+    }
+
+    /**
+     * Reclaims the pack skeleton directory only when nothing of the pack
+     * remains. Callers delete their own staging token directory first; this
+     * must never wipe other tokens: an in-flight preview of the same pack
+     * still owns them (prepareImport eviction and commit run concurrently
+     * with other previews).
+     *
+     * The reclaim itself is rmdir-only: every delete is a plain
+     * non-recursive `File.delete()`, which succeeds only on an empty
+     * directory. The emptiness checks above can race with another prepare
+     * creating a new staging token (or any writer adding content) between
+     * the check and the delete; recursive deletion would destroy that new
+     * content, while a rmdir that fails on a directory which now has content
+     * just leaves the skeleton behind for the next reclaim or startup scan.
+     *
+     * A rmdir that fails on a directory that is still empty, however, is a
+     * real IO failure (open handle/permission) and is reported as a typed
+     * IO red card instead of letting the caller assume the skeleton is gone.
+     */
     private fun cleanupEmptyPackDir(id: io.legado.pack.api.PackId) {
         if (layout.currentFile(id).exists()) return
         val packDir = layout.packDir(id)
         if (!packDir.isDirectory) return
-        val dataDir = layout.dataDir(id)
-        if (dataDir.exists()) return
-        val codeRoot = layout.codeRoot(id)
-        if (codeRoot.exists() && codeRoot.listFiles()?.isNotEmpty() == true) return
-        val stagingRoot = layout.stagingRoot(id)
-        if (stagingRoot.exists()) {
-            stagingRoot.listFiles()?.forEach { AtomicFiles.deleteRecursively(it) }
+        if (hasEntries(layout.dataDir(id))) return
+        if (hasEntries(layout.codeRoot(id))) return
+        if (hasEntries(layout.stagingRoot(id))) return
+        val undeletable = ArrayList<File>()
+        deleteSkeletonDir(layout.stagingRoot(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.dataDir(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.codeRoot(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.kvDir(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.logsDir(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.cookiesDir(id))?.let { undeletable += it }
+        deleteSkeletonDir(layout.optDir(id))?.let { undeletable += it }
+        if (!packDir.delete() && !hasEntries(packDir)) {
+            // The pack dir itself is empty but could not be removed; the
+            // children were either reclaimed or kept for a legitimate reason
+            // already accounted for above.
+            undeletable += packDir
         }
-        AtomicFiles.deleteRecursively(packDir)
+        if (undeletable.isNotEmpty()) {
+            throw PackException(
+                PackDiagnostic(
+                    code = PackErrorCode.IO_FAILED,
+                    message = "cannot reclaim the empty pack skeleton; " +
+                        "${undeletable.size} empty directories remain",
+                    path = id.value,
+                    details = mapOf(
+                        "residualCount" to undeletable.size.toString(),
+                        "residual" to undeletable.joinToString(",") { it.name },
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * One rmdir attempt with failure classification. Returns null when the
+     * directory is gone (or never existed) or when a failed rmdir was saved
+     * by new content appearing under it (another preview's token: the caller
+     * keeps the skeleton silently). Returns the directory itself when a
+     * still-empty directory could not be removed — an IO failure to report.
+     */
+    private fun deleteSkeletonDir(directory: File): File? {
+        if (deleteDirIfEmpty(directory)) return null
+        return if (hasEntries(directory)) null else directory
+    }
+
+    /** Unknown directory content counts as "not empty"; the pack dir is kept. */
+    private fun hasEntries(directory: File): Boolean {
+        if (!directory.exists()) return false
+        val children = directory.listFiles() ?: return true
+        return children.isNotEmpty()
+    }
+
+    /**
+     * Non-recursive rmdir: deletes [directory] only when it is an empty
+     * directory. A directory that does not exist counts as reclaimed; a
+     * non-directory entry is left untouched for the startup scan to judge.
+     */
+    private fun deleteDirIfEmpty(directory: File): Boolean {
+        if (!directory.exists()) return true
+        if (!directory.isDirectory) return false
+        return directory.delete()
     }
 
     private fun ensureRoots() {
@@ -373,5 +474,10 @@ internal class PackImporter(
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
         return decoder.decode(ByteBuffer.wrap(bytes)).toString()
+    }
+
+    companion object {
+        /** Cap for residual paths inlined into a discard failure diagnostic. */
+        private const val ResidualDetailLimit = 8
     }
 }

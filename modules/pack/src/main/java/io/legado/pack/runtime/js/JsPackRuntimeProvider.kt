@@ -112,13 +112,22 @@ class JsPackRuntimeProvider : PackRuntimeProvider {
                         cx.frame!!.check()
                     }
                 } catch (abort: SandboxAbort) {
-                    throw abort.failure
+                    // Bridge wrappers catch Exception, so the original failure
+                    // arrives here instead of reaching the typed handlers
+                    // below; unwrap it into a typed PackException instead of
+                    // rethrowing it raw (which would surface as INTERNAL).
+                    throw typedFailure(abort.failure)
+                } catch (limit: JsCodecLimitExceeded) {
+                    runtimeFailure(
+                        PackErrorCode.IMPORT_LIMIT_EXCEEDED,
+                        "JS JSON limit exceeded: ${limit.original.details().take(1024)}",
+                        limit.original,
+                    )
                 } catch (e: RhinoException) {
-                    val details = e.details().take(1024)
-                    val code = if (details.contains("limit exceeded") || details.contains("too many JSON")) {
-                        PackErrorCode.IMPORT_LIMIT_EXCEEDED
-                    } else PackErrorCode.LOAD_FAILED
-                    runtimeFailure(code, "JS execution failed: $details", e)
+                    // No message sniffing: script-controlled text must never
+                    // select the wire error code. Framework limits are typed
+                    // through JsCodecLimitExceeded at the codec call sites.
+                    runtimeFailure(PackErrorCode.LOAD_FAILED, "JS execution failed: ${e.details().take(1024)}", e)
                 } catch (e: StackOverflowError) {
                     runtimeFailure(PackErrorCode.LOAD_FAILED, "JS interpreter stack limit exceeded", e)
                 } finally {
@@ -137,10 +146,68 @@ class JsPackRuntimeProvider : PackRuntimeProvider {
                 val arg = toJs(cx, RuntimeJson.parse(argJson, call), scope!!)
                 val result = resolve(cx, command).call(cx, scope!!, exports, arrayOf(arg))
                 call.checkActive()
-                val json = (encoder!!.call(cx, scope!!, null, arrayOf(result, PackJsProtocol.MAX_JSON_CHARS)) as CharSequence).toString()
+                val json = encodeWithCodec(cx, result, PackJsProtocol.MAX_JSON_CHARS)
                 RuntimeJson.parse(json, call)
                 json
             }
+        }
+
+        /**
+         * Invokes the framework JSON codec. Codec failures are classified by
+         * error type at this framework-owned call site: the codec only throws
+         * its own RangeError/TypeError, so a RangeError is one of the
+         * framework's limits and becomes the typed [JsCodecLimitExceeded]
+         * marker. Everything else keeps the generic RhinoException mapping.
+         */
+        private fun encodeWithCodec(cx: Context, value: Any?, limit: Int): String {
+            val raw = try {
+                encoder!!.call(cx, scope!!, null, arrayOf(value, limit))
+            } catch (e: RhinoException) {
+                if (codecErrorIsRangeError(e)) throw JsCodecLimitExceeded(e)
+                throw e
+            }
+            if (raw !is CharSequence) {
+                runtimeFailure(PackErrorCode.INTERNAL, "pack JSON codec returned a non-string")
+            }
+            return raw.toString()
+        }
+
+        private fun codecErrorIsRangeError(e: RhinoException): Boolean = when (e) {
+            is EcmaError -> "RangeError" == e.getName()
+            is JavaScriptException -> {
+                val value = e.getValue()
+                value is Scriptable && "RangeError" == (ScriptableObject.getProperty(value, "name") as? String)
+            }
+            else -> false
+        }
+
+        /**
+         * Fallback typing for failures unwrapped from [SandboxAbort]: already
+         * typed exceptions (including cooperative cancellation/timeout, which
+         * must keep their CancellationException semantics) pass through; the
+         * framework's codec limit marker maps to IMPORT_LIMIT_EXCEEDED;
+         * everything else becomes a typed LOAD_FAILED PackException instead of
+         * escaping as an untyped internal error.
+         */
+        private fun typedFailure(failure: Exception): Exception = when (failure) {
+            is PackException -> failure
+            is PackCancelledException -> failure
+            is PackTimeoutException -> failure
+            is JsCodecLimitExceeded -> runtimeFailure(
+                PackErrorCode.IMPORT_LIMIT_EXCEEDED,
+                "JS JSON limit exceeded: ${failure.original.details().take(1024)}",
+                failure.original,
+            )
+            is RhinoException -> runtimeFailure(
+                PackErrorCode.LOAD_FAILED,
+                "JS execution failed: ${failure.details().take(1024)}",
+                failure,
+            )
+            else -> runtimeFailure(
+                PackErrorCode.LOAD_FAILED,
+                "JS bridge failed: ${failure.javaClass.simpleName}: ${failure.message?.take(256)}",
+                failure,
+            )
         }
 
         fun resolve(cx: Context, command: String): Function {
@@ -177,6 +244,16 @@ class JsPackRuntimeProvider : PackRuntimeProvider {
                 }
                 return value.toString()
             }
+
+            /** Explicit JS `undefined` (and a missing argument) mean "absent". */
+            fun optionalString(args: Array<Any?>, index: Int): String? {
+                val value = args.getOrNull(index)
+                if (value == null || value === Undefined.instance) return null
+                if (value !is CharSequence || value.length > PackJsProtocol.MAX_JSON_CHARS) {
+                    runtimeFailure(PackErrorCode.INVALID_REQUEST, "primitive argument $index must be a bounded string")
+                }
+                return value.toString()
+            }
             bridge("kvGet") { a, _ -> primitives.kvGet(string(a, 0))?.also {
                 if (it.length > PackJsProtocol.MAX_JSON_CHARS) runtimeFailure(PackErrorCode.IMPORT_LIMIT_EXCEEDED, "KV result limit exceeded")
             } }
@@ -189,14 +266,18 @@ class JsPackRuntimeProvider : PackRuntimeProvider {
                 json
             }
             bridge("http") { a, active ->
+                // Admission first: an undeclared network capability must fail
+                // before the request is serialized (no network I/O happens
+                // either way, so "undeclared means disabled" is unchanged).
+                primitives.ensureHttpAdmitted()
                 val activeCx = Context.getCurrentContext()!!
-                val json = (encoder!!.call(activeCx, scope, null, arrayOf(a.getOrNull(0), PackJsHttpJson.MAX_HTTP_JSON_CHARS)) as CharSequence).toString()
+                val json = encodeWithCodec(activeCx, a.getOrNull(0), PackJsHttpJson.MAX_HTTP_JSON_CHARS)
                 toJs(activeCx, RuntimeJson.parse(primitives.http(json, active), active, PackJsHttpJson.MAX_HTTP_JSON_CHARS), scope)
             }
             bridge("cryptoDigest") { a, _ -> boundedResult(primitives.cryptoDigest(string(a, 0), string(a, 1))) }
             bridge("cryptoHmac") { a, _ -> boundedResult(primitives.cryptoHmac(string(a, 0), string(a, 1), string(a, 2))) }
             bridge("cryptoCipher") { a, _ ->
-                boundedResult(primitives.cryptoCipher(string(a, 0), string(a, 1), if (a.getOrNull(2) == null) null else string(a, 2), string(a, 3)))
+                boundedResult(primitives.cryptoCipher(string(a, 0), string(a, 1), optionalString(a, 2), string(a, 3)))
             }
             // Internal guard is not installed on globalThis; the encoder captures it.
             api.sealObject()
@@ -246,6 +327,13 @@ class JsPackRuntimeProvider : PackRuntimeProvider {
     private class SandboxAbort(val failure: Exception) : Error(failure) {
         override fun fillInStackTrace(): Throwable = this
     }
+
+    /**
+     * Private typed marker: the framework JSON codec hit one of its own
+     * limits. Thrown only at framework-owned codec call sites, so error-code
+     * classification never depends on script-controlled message text.
+     */
+    private class JsCodecLimitExceeded(val original: RhinoException) : RuntimeException(original)
     private class SandboxContext(val owner: SandboxFactory) : Context(owner) {
         var frame: Frame? = null
     }

@@ -42,6 +42,7 @@ class PackDiagnosticsStore(
             code = code,
             packRef = packRef,
             requestId = requestId,
+            path = path?.replace('\n', ' ')?.replace('\r', ' ')?.take(MaxPathChars),
             details = Redaction.redactDetails(details).toMap(),
         )
         synchronized(lock) {
@@ -72,7 +73,10 @@ class PackDiagnosticsStore(
         synchronized(lock) {
             val source = if (id == null) globalEvents else perPack[id] ?: return emptyList()
             val skip = (source.size - limit).coerceAtLeast(0)
-            return source.drop(skip)
+            // Defensive copy, mirroring PackLogStore.snapshot: the stored
+            // events (and their details maps) must not be mutable from the
+            // outside.
+            return source.drop(skip).map { it.copy(details = it.details.toMap()) }
         }
     }
 
@@ -90,5 +94,9 @@ class PackDiagnosticsStore(
         code.severity == io.legado.pack.api.PackSeverity.RED_CARD -> PackLogLevel.ERROR
         code.severity == io.legado.pack.api.PackSeverity.WARNING -> PackLogLevel.WARN
         else -> PackLogLevel.INFO
+    }
+
+    private companion object {
+        private const val MaxPathChars = 256
     }
 }

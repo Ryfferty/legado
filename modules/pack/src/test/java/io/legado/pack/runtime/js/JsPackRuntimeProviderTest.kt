@@ -72,6 +72,40 @@ class JsPackRuntimeProviderTest {
         instance.close()
     }
 
+    @Test fun cryptoCipherTreatsExplicitUndefinedIvAsAbsent() {
+        // The documented signature is `ivBase64?`: an explicit JS `undefined`
+        // must behave like a missing argument instead of INVALID_REQUEST.
+        val context = RuntimeTestContext(
+            "globalThis.__packExports={hello:function(a) {" +
+                "if (a === 'undef') return __packApi.cryptoCipher('undef-spec','YWJj',undefined,'ZGVm');" +
+                "return __packApi.cryptoCipher('iv-spec','YWJj','aXY=','ZGVm'); }};",
+            setOf(PackCapability.CRYPTO),
+        )
+        val instance = load(context)
+        assertEquals("\"ZGVm\"", instance.invoke("hello", "\"undef\"", context.call()))
+        assertNull(context.cipherCalls["undef-spec"]?.first)
+        assertEquals("\"ZGVm\"", instance.invoke("hello", "\"iv\"", context.call()))
+        assertTrue(context.cipherCalls["iv-spec"]?.first?.contentEquals(byteArrayOf(0x69, 0x76)) == true)
+        instance.close()
+    }
+
+    @Test fun httpAdmissionFailsBeforeTheRequestIsSerialized() {
+        // The capability/network check runs before the request is serialized:
+        // with an oversized request body the failure must still be the
+        // permission denial, not a codec limit or an internal error.
+        val context = RuntimeTestContext(
+            "globalThis.__packExports={hello:function(){" +
+                "return __packApi.http({method:'GET',url:'http://example.com'," +
+                "bodyBase64:new Array(24000002).join('A')});}};",
+            setOf(PackCapability.HTTP),
+        )
+        val instance = load(context)
+        val failure = assertThrows(PackException::class.java) { instance.invoke("hello", "null", context.call()) }
+        assertEquals(PackErrorCode.PERMISSION_DENIED, failure.diagnostic.code)
+        assertTrue(failure.diagnostic.message.contains("network is not declared"))
+        instance.close()
+    }
+
     @Test fun undeclaredPrimitiveFailsWithoutExposingJavaException() {
         val context = RuntimeTestContext("globalThis.__packExports={hello:function(){ try { __packApi.kvGet('x'); } catch(e) { return e; } }};")
         val instance = load(context)

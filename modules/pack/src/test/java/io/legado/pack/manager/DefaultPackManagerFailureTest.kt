@@ -10,9 +10,11 @@ import io.legado.pack.api.PackId
 import io.legado.pack.api.PackState
 import io.legado.pack.api.RuntimeAvailability
 import io.legado.pack.registry.PackRegistry
+import io.legado.pack.runtime.DETAIL_RESIDENT_AFTER_FAILURE
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -138,5 +140,69 @@ class DefaultPackManagerFailureTest {
         assertEquals(PackErrorCode.COMPONENT_MISSING, result.error!!.code)
         assertTrue(result.error!!.isRedCard)
         assertEquals(0, provider.loadCount.get())
+    }
+
+    @Test
+    fun residentLoadFailureQuarantinesAndReportsResidencyOnDisableAndUninstall() = runBlocking {
+        val provider = FakeRuntimeProvider()
+        // A load that failed after mapping trusted code (the shape the native
+        // bridge reports through the resident-after-failure detail).
+        provider.loadFailure = PackException(
+            PackDiagnostic(
+                PackErrorCode.NATIVE_PLATFORM,
+                "native file load failed: mapped library is pinned until restart",
+                details = mapOf(DETAIL_RESIDENT_AFTER_FAILURE to "true"),
+            ),
+        )
+        val manager = managerWith(provider)
+        PackFixtures.install(manager, PackFixtures.userscript(id = "resident-fail"))
+        val result = manager.invokeBlocking(
+            PackId.require("resident-fail"),
+            "hello",
+            "{}",
+            PackCaller.Host,
+        )
+        assertEquals(PackErrorCode.NATIVE_PLATFORM, result.error!!.code)
+        assertEquals("true", result.error!!.details[DETAIL_RESIDENT_AFTER_FAILURE])
+        // The mapped code has no closable instance: the pack is quarantined.
+        assertEquals(PackState.NEEDS_RESTART, manager.info(PackId.require("resident-fail"))!!.state)
+
+        // Disable must not claim a clean release while the code is resident.
+        val disabled = manager.setEnabled(PackId.require("resident-fail"), false)
+        assertEquals(PackErrorCode.NEEDS_RESTART, disabled.error!!.code)
+
+        // The uninstall report must say the code is still resident even though
+        // the disk is cleared: no instance was ever registered to close.
+        val report = manager.uninstall(PackId.require("resident-fail"))
+        assertTrue(report.residualPaths.isEmpty())
+        assertTrue(report.loadedCodeStillResident)
+        assertTrue(report.needsRestart)
+        assertFalse(report.clean)
+        assertEquals(PackErrorCode.NEEDS_RESTART, report.failure!!.code)
+    }
+
+    @Test
+    fun plainLoadFailureWithoutResidencyStillUninstallsClean() = runBlocking {
+        val provider = FakeRuntimeProvider()
+        provider.loadFailure = PackException(
+            PackDiagnostic(PackErrorCode.LOAD_FAILED, "plain load failure"),
+        )
+        val manager = managerWith(provider)
+        PackFixtures.install(manager, PackFixtures.userscript(id = "plain-fail"))
+        val result = manager.invokeBlocking(
+            PackId.require("plain-fail"),
+            "hello",
+            "{}",
+            PackCaller.Host,
+        )
+        assertEquals(PackErrorCode.LOAD_FAILED, result.error!!.code)
+        // No residency signal: broken (recoverable), not quarantined.
+        assertEquals(PackState.BROKEN, manager.info(PackId.require("plain-fail"))!!.state)
+
+        val report = manager.uninstall(PackId.require("plain-fail"))
+        assertTrue(report.residualPaths.isEmpty())
+        assertFalse(report.loadedCodeStillResident)
+        assertFalse(report.needsRestart)
+        assertTrue(report.clean)
     }
 }
