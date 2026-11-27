@@ -4,6 +4,7 @@ import android.os.Process
 import android.system.Os
 import android.system.OsConstants
 import io.legado.pack.api.*
+import io.legado.pack.storage.AtomicFiles
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -23,7 +24,7 @@ internal object ReadOnlyCode {
         try {
             val parent = target.parentFile ?: runtimeFailure(PackErrorCode.IO_FAILED, "missing runtime directory")
             if (!parent.isDirectory && !parent.mkdirs()) runtimeFailure(PackErrorCode.IO_FAILED, "cannot create private runtime directory")
-            if (context.storage.dataFile(relative).canonicalFile != target.absoluteFile) {
+            if (AtomicFiles.isSymbolicLink(target)) {
                 runtimeFailure(PackErrorCode.PERMISSION_DENIED, "runtime code path contains a symlink")
             }
             if (!target.exists()) {

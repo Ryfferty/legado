@@ -154,14 +154,26 @@ internal object AtomicFiles {
         return listRelativeFiles(root).take(limit).map { it.first }
     }
 
+    /**
+     * True only when [file] itself is a symbolic link.
+     *
+     * The parent is resolved canonically and the file name is appended, so
+     * symlinked ancestors do not make every file look like a link (on Android
+     * the app data directory itself lives under `/data/user/0`, which is a
+     * symlink to `/data/data`; comparing `absoluteFile` with `canonicalFile`
+     * therefore reported every pack file as a symbolic link and broke
+     * uninstall and DEX/native staging on device). A real link at the path is
+     * still detected because its canonical path resolves beyond the parent.
+     */
     fun isSymbolicLink(file: File): Boolean {
         return try {
-            val absolute = file.absoluteFile
-            val canonical = file.canonicalFile
+            val parent = file.parentFile ?: return false
+            val expected = File(parent.canonicalFile, file.name).path
+            val canonical = file.canonicalFile.path
             if (File.separatorChar == '\\') {
-                !absolute.path.equals(canonical.path, ignoreCase = true)
+                !expected.equals(canonical, ignoreCase = true)
             } else {
-                absolute.path != canonical.path
+                expected != canonical
             }
         } catch (_: IOException) {
             false
