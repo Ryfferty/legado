@@ -82,7 +82,7 @@ class PackManageActivity :
     private fun initLiveData() {
         viewModel.packsLiveData.observe(this) { packs ->
             adapter.setItems(packs, adapter.diffItemCallBack)
-            upEmptyView()
+            upEmptyView(packs)
         }
         viewModel.importBusyLiveData.observe(this) { busy ->
             upProgressDialog(busy, R.string.pack_import_checking)
@@ -141,8 +141,13 @@ class PackManageActivity :
         }
     }
 
-    private fun upEmptyView() {
-        if (adapter.isEmpty()) {
+    /**
+     * 空态可见性以本次数据为准。`setItems(list, diffCallback)` 在可见时是
+     * 异步 Diff, 应用完成前 `adapter.isEmpty()` 仍是旧列表, 若此时用适配器
+     * 状态判空会把 RecyclerView 永久置为 gone(导入成功后列表不显示)。
+     */
+    private fun upEmptyView(packs: List<PackInfo>) {
+        if (packs.isEmpty()) {
             binding.llEmpty.visible()
             binding.recyclerView.gone()
         } else {
