@@ -3,6 +3,7 @@ package io.legado.app.web.mcp
 import io.legado.app.help.pack.FakePackManager
 import io.legado.app.help.pack.HostMcpToolNames
 import io.legado.app.help.pack.PackFixtures
+import io.legado.app.help.pack.PackMcpSchema
 import io.legado.app.help.pack.PackToolPermissionStore
 import io.legado.pack.api.PackErrorCode
 import io.legado.pack.registry.PackRegistration
@@ -11,6 +12,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.shared.Transport
 import io.modelcontextprotocol.kotlin.sdk.shared.TransportSendOptions
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCMessage
 import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCNotification
@@ -18,6 +20,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -46,6 +49,7 @@ class PackMcpBridgeTest {
         val second = RecordingTransport()
         server.createSession(first)
         server.createSession(second)
+        awaitSessionSubscriptions(server, first, second)
 
         val registration = PackRegistration(
             PackFixtures.ref(),
@@ -153,7 +157,7 @@ class PackMcpBridgeTest {
             "{}",
             "client",
         )
-        assertEquals("PACK_DISABLED", result.structuredContent!!["code"]!!.jsonPrimitive.content)
+        assertEquals(PackErrorCode.INVALID_REQUEST.wire, result.structuredContent!!["code"]!!.jsonPrimitive.content)
         assertTrue(result.isError == true)
 
         bridge.close()
@@ -223,14 +227,77 @@ class PackMcpBridgeTest {
         ),
     )
 
+    /**
+     * The SDK (0.15.0) delivers feature notifications through a SharedFlow with
+     * replay = 0; each session's collector coroutine runs on Dispatchers.Default
+     * and only starts collecting some time after `createSession` returns, so a
+     * `replaceAll` immediately afterwards can race the collector's subscription
+     * and have its notification dropped with no way to recover it.
+     *
+     * The warm-up therefore establishes two explicit baselines per session
+     * before the test body runs:
+     *
+     * 1. A subscription witness: every transport must *consume* a canary
+     *    notification of its own. A send-side flag is not a witness — it used
+     *    to be flipped before the message was even queued, and a round that
+     *    spent one shared timeout waiting for the first transport never waited
+     *    for (or consumed) the second transport's canary, which then lingered
+     *    as residue for the rounds that followed.
+     * 2. A consumption baseline: every queue is drained until each transport
+     *    has consumed everything the warm-up sent it, so the assertions in the
+     *    test body can only be satisfied by the notifications their own
+     *    actions produce.
+     */
+    private suspend fun awaitSessionSubscriptions(
+        server: Server,
+        vararg transports: RecordingTransport,
+    ) {
+        var round = 0
+        while (transports.any { it.consumedMessages == 0 }) {
+            round += 1
+            check(round <= CANARY_ROUNDS) {
+                "sessions did not subscribe to tool notifications " +
+                    "within $CANARY_ROUNDS canary rounds"
+            }
+            server.addTool(
+                name = "subscription_canary_$round",
+                description = "awaitSessionSubscriptions canary; never invoked",
+                inputSchema = requireNotNull(PackMcpSchema.toToolSchema(PackFixtures.schema())),
+            ) { _ -> CallToolResult(content = emptyList()) }
+            // One timeout per still-unproven transport: a transport that has
+            // not subscribed yet burns only its own deadline, and a transport
+            // that proves itself early is left alone instead of sharing one
+            // sequential wait whose timeout can strand another's canary.
+            transports.filter { it.consumedMessages == 0 }.forEach { transport ->
+                withTimeoutOrNull(CANARY_ROUND_TIMEOUT_MS) {
+                    transport.awaitNotification(toolListChanged)
+                }
+            }
+        }
+        // The witnesses prove each collector ran at some point; canaries from
+        // earlier rounds may still sit in a queue or be in flight behind a
+        // slow collector. Drain every queue until it stays quiet so each
+        // session starts the test body from one known-empty baseline.
+        transports.forEach { it.drainNotifications() }
+    }
+
     private class RecordingTransport : Transport {
         private val messages = Channel<JSONRPCMessage>(Channel.UNLIMITED)
         private var closeBlock: (() -> Unit)? = null
+
+        /** Messages queued through [send]; counted only after the enqueue. */
+        var sentMessages: Int = 0
+            private set
+
+        /** Messages taken off the queue by the test; the consumption baseline. */
+        var consumedMessages: Int = 0
+            private set
 
         override suspend fun start() = Unit
 
         override suspend fun send(message: JSONRPCMessage, options: TransportSendOptions?) {
             messages.send(message)
+            sentMessages += 1
         }
 
         override suspend fun close() {
@@ -249,6 +316,7 @@ class PackMcpBridgeTest {
             withTimeout(3_000L) {
                 while (true) {
                     val message = messages.receive()
+                    consumedMessages += 1
                     if (message is JSONRPCNotification && message.method == method) {
                         return@withTimeout message
                     }
@@ -256,5 +324,32 @@ class PackMcpBridgeTest {
                 @Suppress("UNREACHABLE_CODE")
                 error("unreachable")
             }
+
+        /**
+         * Consumes everything queued until the queue stays quiet for a whole
+         * drain window, then requires everything sent to have been consumed.
+         * Warm-up residue left behind here would otherwise satisfy a later
+         * `awaitNotification` that was meant for the notification the test
+         * body itself triggered.
+         */
+        suspend fun drainNotifications() {
+            while (true) {
+                val message = withTimeoutOrNull(DRAIN_QUIET_TIMEOUT_MS) { messages.receive() }
+                if (message == null) {
+                    break
+                }
+                consumedMessages += 1
+            }
+            check(sentMessages == consumedMessages) {
+                "recording transport drained with " +
+                    "${sentMessages - consumedMessages} message(s) still queued or in flight"
+            }
+        }
+    }
+
+    private companion object {
+        const val CANARY_ROUNDS = 10
+        const val CANARY_ROUND_TIMEOUT_MS = 1_000L
+        const val DRAIN_QUIET_TIMEOUT_MS = 500L
     }
 }

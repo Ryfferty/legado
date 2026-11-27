@@ -21,7 +21,9 @@ import java.io.InputStream
 /**
  * Test double that mirrors the manager's epoch admission rules: an invocation
  * carrying an old [io.legado.pack.api.PackRef] is rejected instead of being
- * redirected to the current revision.
+ * redirected to the current revision, with the same
+ * [PackErrorCode.INVALID_REQUEST] diagnostic `DefaultPackManager.admit`
+ * produces for a stale reference.
  */
 class FakePackManager(initial: List<PackInfo> = emptyList()) : PackManager {
 
@@ -40,6 +42,8 @@ class FakePackManager(initial: List<PackInfo> = emptyList()) : PackManager {
         PackResult.ok(invocation.expectedRef.id.value, "{\"ok\":true}", 1L)
     }
 
+    private val importQueue = ArrayDeque<PackInfo>()
+
     init {
         initial.forEach { info ->
             infos[info.ref.id] = info
@@ -55,6 +59,11 @@ class FakePackManager(initial: List<PackInfo> = emptyList()) : PackManager {
         latestReports[report.packRef.id] = report
     }
 
+    /** Queues the [PackInfo] the next [commitImport] returns, like a completed preview. */
+    fun enqueueImport(info: PackInfo) {
+        importQueue.addLast(info)
+    }
+
     override suspend fun prepareImport(
         input: InputStream,
         hint: PackImportHint,
@@ -63,7 +72,12 @@ class FakePackManager(initial: List<PackInfo> = emptyList()) : PackManager {
     override suspend fun commitImport(
         previewToken: String,
         grant: PackGrant,
-    ): PackInfo = throw UnsupportedOperationException("not used in this test")
+    ): PackInfo {
+        val info = importQueue.removeFirstOrNull()
+            ?: throw UnsupportedOperationException("no enqueued import for token '$previewToken'")
+        infos[info.ref.id] = info
+        return info
+    }
 
     override suspend fun setEnabled(id: PackId, enabled: Boolean): PackResult {
         val current = infos[id] ?: return failure(PackErrorCode.PACK_NOT_FOUND, "missing pack")
@@ -127,8 +141,8 @@ class FakePackManager(initial: List<PackInfo> = emptyList()) : PackManager {
             return PackResult.failure(
                 invocation.expectedRef.id.value,
                 PackDiagnostic(
-                    code = PackErrorCode.PACK_DISABLED,
-                    message = "stale pack epoch",
+                    code = PackErrorCode.INVALID_REQUEST,
+                    message = "stale pack reference; entry belongs to another revision or epoch",
                 ),
                 0L,
             )

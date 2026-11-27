@@ -114,7 +114,8 @@ class PackManageViewModel(application: Application) : BaseViewModel(application)
             importBusyLiveData.postValue(false)
             importSelection = null
             importUiStateLiveData.postValue(null)
-            applyWriteToolGrants(info, grant)
+            // 写工具授权由 HostPackManager.commitImport 按勾选结果播种,
+            // 此处不再重复同步, 见 PackHost.kt。
             refreshPacks()
             messageEvent.postValue(
                 PackUiEvent(context.getString(R.string.pack_import_success, info.manifest.name))
@@ -124,26 +125,6 @@ class PackManageViewModel(application: Application) : BaseViewModel(application)
             // 保留预览, 用户修正勾选后可重试
             AppLog.put("安装扩展包失败", it)
             commitErrorLiveData.postValue(errorText(it))
-        }
-    }
-
-    /**
-     * 用户在导入确认中勾选的写工具同步到宿主写授权。
-     * 默认不勾选即保持关闭, 不存在任何自动授予;
-     * 升级/重装因权限摘要或修订变化会使旧授权失效, 需重新开启。
-     */
-    private fun applyWriteToolGrants(info: PackInfo, grant: PackGrant) {
-        val writeTools = info.manifest.mcpTools.filter { it.isWrite }.map { it.name }
-        if (writeTools.isEmpty()) return
-        execute {
-            writeTools.forEach { name ->
-                PackHost.setPackWriteToolEnabled(info.ref.id, name, grant.permitsTool(name))
-            }
-        }.onError {
-            AppLog.put("同步写工具授权失败", it)
-            messageEvent.postValue(
-                PackUiEvent(context.getString(R.string.pack_write_tool_sync_failed))
-            )
         }
     }
 

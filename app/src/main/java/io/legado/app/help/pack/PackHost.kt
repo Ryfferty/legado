@@ -7,6 +7,7 @@ import io.legado.app.BuildConfig
 import io.legado.pack.api.ComponentKind
 import io.legado.pack.api.NativeAbi
 import io.legado.pack.api.NativeLoadMode
+import io.legado.pack.api.PackException
 import io.legado.pack.api.PackGrant
 import io.legado.pack.api.PackHostEnvironment
 import io.legado.pack.api.PackId
@@ -188,6 +189,15 @@ object PackHost {
  * prior write grant meaningless (import/disable/enable/uninstall) revoke the
  * persisted write permission; re-importing identical content therefore cannot
  * inherit an old grant just because its revision and epoch happen to repeat.
+ *
+ * The revocation is fail-closed, not best-effort: [PackToolPermissionStore]
+ * records it durably (journal first, grants file second, destructive delete as
+ * the last resort), so a failing write does not silently resurrect a grant
+ * after a restart. When no durable record was possible the failure surfaces as
+ * a red card — thrown for [commitImport], whose result type cannot carry a
+ * diagnostic, and attached to the [PackResult]/[UninstallReport] the framework
+ * already produced, so a completed transition is neither reported as a plain
+ * success nor loses its report.
  */
 internal class HostPackManager(
     private val delegate: PackManager,
@@ -198,7 +208,9 @@ internal class HostPackManager(
         val info = delegate.commitImport(previewToken, grant)
         // The import dialog's explicit write checks are the initial grant.
         // Everything else starts off; later management toggles use the same
-        // store through setPackWriteToolEnabled.
+        // store through setPackWriteToolEnabled. A revoke or seed that cannot
+        // be persisted throws: the pack is imported, but no write tool is
+        // granted and the caller sees the red card.
         permissions.removePack(info.ref.id)
         info.manifest.mcpTools
             .filter { it.isWrite && grant.permitsTool(it.name) }
@@ -215,16 +227,25 @@ internal class HostPackManager(
 
     override suspend fun setEnabled(id: PackId, enabled: Boolean): PackResult {
         val result = delegate.setEnabled(id, enabled)
-        if (!result.isError) {
-            permissions.removePack(id)
+        if (result.isError) {
+            return result
         }
-        return result
+        return try {
+            permissions.removePack(id)
+            result
+        } catch (failure: PackException) {
+            PackResult.failure(result.requestId, failure.diagnostic, result.elapsedMs)
+        }
     }
 
     override suspend fun uninstall(id: PackId): UninstallReport {
         val report = delegate.uninstall(id)
-        permissions.removePack(id)
-        return report
+        return try {
+            permissions.removePack(id)
+            report
+        } catch (failure: PackException) {
+            report.copy(failure = failure.diagnostic)
+        }
     }
 }
 
