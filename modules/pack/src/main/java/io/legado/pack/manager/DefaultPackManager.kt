@@ -138,6 +138,19 @@ class DefaultPackManager(
     private val records = LinkedHashMap<PackId, PackRecord>()
     private val previews = LinkedHashMap<String, PreparedPack>()
     private val activeCalls = LinkedHashMap<String, ActiveCall>()
+
+    /**
+     * Load failures whose trusted code stayed mapped in this process (native
+     * dlopen succeeded, a later step failed), keyed by pack id.
+     *
+     * This witness deliberately lives outside [records]: disable advances the
+     * admission epoch and uninstall removes the record *before* either waits
+     * for an in-flight load, so the record-scoped runtimeNeedsRestart mark is
+     * rejected exactly when such a failure lands. The entry below survives
+     * both mutations; disable/uninstall read it back after the pack's worker
+     * drained and fold it into their residency verdict.
+     */
+    private val residentLoadFailures = LinkedHashMap<PackId, PackDiagnostic>()
     private val componentCallDepth = ThreadLocal<Int>()
 
     @Volatile
@@ -661,7 +674,13 @@ class DefaultPackManager(
         } else {
             CloseSummary.resident("pack calls did not stop within ${executionPolicy.closeTimeoutMs} ms")
         }
-        var needsRestart = !drained || !closeOutcome.released || closeOutcome.needsRestart || residentLoadMarked
+        // A load that failed while this disable was in flight could not write
+        // the record mark (the admission epoch already advanced above); read
+        // the manager-scoped witness only now that the worker drained and
+        // every in-flight failure has landed.
+        val residentFailure = peekResidentLoadFailure(id)
+        var needsRestart = !drained || !closeOutcome.released || closeOutcome.needsRestart ||
+            residentLoadMarked || residentFailure != null
         if (closeOutcome.released) {
             synchronized(stateLock) { record.scope = null }
         }
@@ -669,7 +688,7 @@ class DefaultPackManager(
             markNeedsRestart(
                 id,
                 newStored.ref,
-                closeOutcome.failure ?: PackDiagnostic(
+                residentFailure ?: closeOutcome.failure ?: PackDiagnostic(
                     code = PackErrorCode.NEEDS_RESTART,
                     message = "pack code could not be released; restart required",
                 ),
@@ -695,7 +714,7 @@ class DefaultPackManager(
         synchronized(stateLock) { record.transition = false }
         persistRecord(record)
         val failure = when {
-            needsRestart -> closeOutcome.failure ?: PackDiagnostic(
+            needsRestart -> residentFailure ?: closeOutcome.failure ?: PackDiagnostic(
                 code = PackErrorCode.NEEDS_RESTART,
                 message = "pack disabled but code is still resident; restart required",
             )
@@ -849,7 +868,8 @@ class DefaultPackManager(
         // A load that failed after mapping trusted code (e.g. native dlopen
         // succeeded and a later step failed) set this mark: no instance was
         // registered, so closeRuntimeScope cannot see the residency and would
-        // report a clean release. The mark is the only durable witness.
+        // report a clean release. The mark only covers failures that landed
+        // while the record still matched the failing ref.
         val residentLoadMarked = synchronized(stateLock) { record.runtimeNeedsRestart }
         val drained = worker?.awaitIdle(executionPolicy.closeTimeoutMs) ?: true
         val closeOutcome = if (drained) {
@@ -857,6 +877,13 @@ class DefaultPackManager(
         } else {
             CloseSummary.resident("pack calls did not stop within ${executionPolicy.closeTimeoutMs} ms")
         }
+        // The record was removed above, so a load that failed while this
+        // uninstall was draining could only record the residency in the
+        // manager-scoped witness. Consume it now that the worker drained: the
+        // mapping it describes is pinned until a process restart, and a
+        // reinstall of the same id must not inherit this installation's
+        // failure report.
+        val residentFailure = takeResidentLoadFailure(id)
         // Aligned with disablePack: a worker that did not stop within the
         // budget keeps the process marked for restart instead of letting the
         // uninstall report claim a clean state.
@@ -866,7 +893,7 @@ class DefaultPackManager(
             logStore.onPackRemoved(id)
         }
         diagnosticsStore.onPackRemoved(id)
-        val loadedResident = !drained || !closeOutcome.released || residentLoadMarked
+        val loadedResident = !drained || !closeOutcome.released || residentLoadMarked || residentFailure != null
         val needsRestart = loadedResident || closeOutcome.needsRestart || !workerStopped
         val failure = when {
             residual.isNotEmpty() -> PackDiagnostic(
@@ -876,7 +903,7 @@ class DefaultPackManager(
             )
 
             closeOutcome.failure != null -> closeOutcome.failure!!
-            residentLoadMarked -> PackDiagnostic(
+            residentLoadMarked || residentFailure != null -> residentFailure ?: PackDiagnostic(
                 code = PackErrorCode.NEEDS_RESTART,
                 message = "pack code from a failed load remains mapped in this process; restart required",
                 path = id.value,
@@ -1618,17 +1645,20 @@ class DefaultPackManager(
             // succeeded, a later step failed) leaves no closable instance, so
             // closeRuntimeScope would otherwise report a clean release. Mark
             // the pack NEEDS_RESTART durably; disable/uninstall fold this
-            // mark into their residency reporting.
+            // mark into their residency reporting. The record mark alone is
+            // not enough while this load races a lifecycle transition: a
+            // disable that already advanced the epoch or an uninstall that
+            // already removed the record rejects the mark, so the
+            // manager-scoped witness (which survives both) is recorded first
+            // and aggregated once disable/uninstall drained this worker.
             if (e.diagnostic.isResidentLoadFailure()) {
-                markNeedsRestart(
-                    record.id,
-                    ref,
-                    PackDiagnostic(
-                        code = PackErrorCode.NEEDS_RESTART,
-                        message = "component '${component.id}' failed to load but its code remains mapped in this process; restart required",
-                        path = "components/${component.id}",
-                    ),
+                val diagnostic = PackDiagnostic(
+                    code = PackErrorCode.NEEDS_RESTART,
+                    message = "component '${component.id}' failed to load but its code remains mapped in this process; restart required",
+                    path = "components/${component.id}",
                 )
+                recordResidentLoadFailure(record.id, diagnostic)
+                markNeedsRestart(record.id, ref, diagnostic)
             }
             throw e
         } catch (e: Exception) {
@@ -2348,6 +2378,36 @@ class DefaultPackManager(
         persistMetadata(captured.first, captured.second)
         diagnosticsStore.recordDiagnostic(ref, null, diagnostic)
     }
+
+    /**
+     * Records the manager-scoped witness for a load failure whose trusted
+     * code stayed mapped in this process. Unlike [markNeedsRestart] this
+     * write is unconditional: it must succeed while a concurrent disable has
+     * already advanced the admission epoch or a concurrent uninstall has
+     * already removed the record — exactly the interleavings in which the
+     * record-scoped mark is rejected.
+     */
+    private fun recordResidentLoadFailure(id: PackId, diagnostic: PackDiagnostic) {
+        synchronized(stateLock) { residentLoadFailures[id] = diagnostic }
+    }
+
+    /**
+     * Non-destructive read of the resident-load witness; disable is a
+     * transient transition, so the entry stays available to the eventual
+     * uninstall (and to a disable retry) until the record is really gone.
+     */
+    private fun peekResidentLoadFailure(id: PackId): PackDiagnostic? =
+        synchronized(stateLock) { residentLoadFailures[id] }
+
+    /**
+     * Reads and clears the resident-load witness. Uninstall is the terminal
+     * aggregation point: the restart it demands is the only real cleanup for
+     * a pinned mapping, and consuming the witness here keeps a reinstall of
+     * the same id from inheriting the previous installation's failure report
+     * (a fresh load of the same path re-reports through the runtime anyway).
+     */
+    private fun takeResidentLoadFailure(id: PackId): PackDiagnostic? =
+        synchronized(stateLock) { residentLoadFailures.remove(id) }
 
     private fun persistRecord(record: PackRecord): Boolean {
         val captured = synchronized(stateLock) { record.persisted() to record.persistSeq }

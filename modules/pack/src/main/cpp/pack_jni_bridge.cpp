@@ -312,8 +312,16 @@ int sealed_copy(int input, size_t size, CallOwner &call, int sdk) {
         }
         position += count;
     }
-    if (fchmod(memory.fd, 0400) != 0 || fcntl(memory.fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        throw std::runtime_error(system_error("cannot seal read-only memfd"));
+    // Android (API 36 emulator, google_apis) denies fchmod() on memfd files with
+    // EACCES (strerror says "Permission denied"); the seals are the actual
+    // immutability guarantee (F_SEAL_WRITE blocks future writable mappings and
+    // truncation, F_SEAL_SEAL locks the seal set), so the mode bit is best-effort
+    // only. Sealing itself stays fatal.
+    if (fchmod(memory.fd, 0400) != 0 && errno != EACCES && errno != EPERM) {
+        throw std::runtime_error(system_error("memfd fchmod read-only"));
+    }
+    if (fcntl(memory.fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        throw std::runtime_error(system_error("memfd F_ADD_SEALS"));
     }
     int result = memory.fd;
     memory.fd = -1;

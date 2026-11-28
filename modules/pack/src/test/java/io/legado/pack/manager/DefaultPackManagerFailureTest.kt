@@ -7,8 +7,10 @@ import io.legado.pack.api.PackDiagnostic
 import io.legado.pack.api.PackErrorCode
 import io.legado.pack.api.PackException
 import io.legado.pack.api.PackId
+import io.legado.pack.api.PackResult
 import io.legado.pack.api.PackState
 import io.legado.pack.api.RuntimeAvailability
+import io.legado.pack.api.UninstallReport
 import io.legado.pack.registry.PackRegistry
 import io.legado.pack.runtime.DETAIL_RESIDENT_AFTER_FAILURE
 import kotlinx.coroutines.runBlocking
@@ -22,6 +24,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class DefaultPackManagerFailureTest {
 
@@ -204,5 +208,149 @@ class DefaultPackManagerFailureTest {
         assertFalse(report.loadedCodeStillResident)
         assertFalse(report.needsRestart)
         assertTrue(report.clean)
+    }
+
+    /**
+     * Deterministic interleaving for the disable leg of the resident-failure
+     * race: the worker is inside a blocked load while disable advances the
+     * admission epoch, and only then does the load fail with the
+     * resident-after-failure signal. The record-scoped mark is rejected
+     * (record.ref already carries the new epoch), so the manager-scoped
+     * witness must carry the residency into the disable result and back into
+     * a durable record mark.
+     */
+    @Test
+    fun residentFailureLandingAfterDisableAdvancedEpochIsNotLost() = runBlocking {
+        val releaseLoad = CountDownLatch(1)
+        val loadEntered = CountDownLatch(1)
+        val provider = FakeRuntimeProvider(
+            loader = { _, _, _, _ ->
+                loadEntered.countDown()
+                check(releaseLoad.await(30, TimeUnit.SECONDS)) { "test did not release the blocked load" }
+                throw PackException(
+                    PackDiagnostic(
+                        PackErrorCode.NATIVE_PLATFORM,
+                        "native file load failed: mapped library is pinned until restart",
+                        details = mapOf(DETAIL_RESIDENT_AFTER_FAILURE to "true"),
+                    ),
+                )
+            },
+        )
+        val manager = managerWith(provider)
+        val id = PackId.require("resident-race-disable")
+        PackFixtures.install(manager, PackFixtures.userscript(id = "resident-race-disable"))
+
+        // The worker enters the blocked load while the pack is still enabled.
+        var invokeResult: PackResult? = null
+        val invokeThread = Thread {
+            invokeResult = manager.invokeBlocking(id, "hello", "{}", PackCaller.Host)
+        }
+        invokeThread.start()
+        assertTrue("load never started", loadEntered.await(30, TimeUnit.SECONDS))
+
+        // Disable advances the epoch (the record's ref no longer matches the
+        // failing load's ref) and then blocks draining this very worker.
+        var disableResult: PackResult? = null
+        val disableThread = Thread {
+            disableResult = runBlocking { manager.setEnabled(id, false) }
+        }
+        disableThread.start()
+        awaitUntil("disable to advance the admission epoch") { manager.info(id)?.state == PackState.DISABLED }
+
+        releaseLoad.countDown()
+        joinThread(invokeThread, "invoke")
+        joinThread(disableThread, "disable")
+
+        assertEquals(PackErrorCode.NATIVE_PLATFORM, invokeResult!!.error!!.code)
+        // The witness, not the (rejected) record mark, produced this verdict.
+        assertEquals(PackErrorCode.NEEDS_RESTART, disableResult!!.error!!.code)
+        assertEquals(
+            "component 'main' failed to load but its code remains mapped in this process; restart required",
+            disableResult!!.error!!.message,
+        )
+        // Aggregation folds the witness back into a durable record mark.
+        assertEquals(PackState.NEEDS_RESTART, manager.info(id)!!.state)
+
+        val report = manager.uninstall(id)
+        assertTrue(report.residualPaths.isEmpty())
+        assertTrue(report.loadedCodeStillResident)
+        assertTrue(report.needsRestart)
+        assertFalse(report.clean)
+        assertEquals(PackErrorCode.NEEDS_RESTART, report.failure!!.code)
+    }
+
+    /**
+     * Deterministic interleaving for the uninstall leg: the record is removed
+     * while the worker is still inside a blocked load; the resident failure
+     * lands only afterwards. With the record gone there is no mark to write,
+     * so only the manager-scoped witness (consumed after the worker drained)
+     * can keep the uninstall report from claiming a clean release.
+     */
+    @Test
+    fun residentFailureLandingAfterRecordRemovalStillReportsResidentOnUninstall() = runBlocking {
+        val releaseLoad = CountDownLatch(1)
+        val loadEntered = CountDownLatch(1)
+        val provider = FakeRuntimeProvider(
+            loader = { _, _, _, _ ->
+                loadEntered.countDown()
+                check(releaseLoad.await(30, TimeUnit.SECONDS)) { "test did not release the blocked load" }
+                throw PackException(
+                    PackDiagnostic(
+                        PackErrorCode.NATIVE_PLATFORM,
+                        "native file load failed: mapped library is pinned until restart",
+                        details = mapOf(DETAIL_RESIDENT_AFTER_FAILURE to "true"),
+                    ),
+                )
+            },
+        )
+        val manager = managerWith(provider)
+        val id = PackId.require("resident-race-uninstall")
+        PackFixtures.install(manager, PackFixtures.userscript(id = "resident-race-uninstall"))
+
+        var invokeResult: PackResult? = null
+        val invokeThread = Thread {
+            invokeResult = manager.invokeBlocking(id, "hello", "{}", PackCaller.Host)
+        }
+        invokeThread.start()
+        assertTrue("load never started", loadEntered.await(30, TimeUnit.SECONDS))
+
+        // Uninstall removes the record (and blocks draining the worker) while
+        // the load is still running; the failure lands only after release.
+        var report: UninstallReport? = null
+        val uninstallThread = Thread {
+            report = runBlocking { manager.uninstall(id) }
+        }
+        uninstallThread.start()
+        awaitUntil("uninstall to remove the record") { manager.info(id) == null }
+
+        releaseLoad.countDown()
+        joinThread(invokeThread, "invoke")
+        joinThread(uninstallThread, "uninstall")
+
+        assertEquals(PackErrorCode.NATIVE_PLATFORM, invokeResult!!.error!!.code)
+        val uninstalled = report!!
+        assertTrue(uninstalled.residualPaths.isEmpty())
+        assertTrue(
+            "a resident failure landing after record removal must not be reported as a clean release",
+            uninstalled.loadedCodeStillResident,
+        )
+        assertTrue(uninstalled.needsRestart)
+        assertFalse(uninstalled.clean)
+        assertEquals(PackErrorCode.NEEDS_RESTART, uninstalled.failure!!.code)
+    }
+
+    /** Polls [condition] until it holds or a 30 s deadline fails the test. */
+    private fun awaitUntil(what: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L)
+        while (!condition()) {
+            assertTrue("timed out waiting for $what", System.nanoTime() < deadline)
+            Thread.sleep(10L)
+        }
+    }
+
+    /** Joins [thread] and fails the test when it did not finish in 30 s. */
+    private fun joinThread(thread: Thread, what: String) {
+        thread.join(TimeUnit.SECONDS.toMillis(30L))
+        assertTrue("$what thread did not finish", !thread.isAlive)
     }
 }
