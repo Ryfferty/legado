@@ -1,5 +1,17 @@
 # 更新日志
 
+**2026/11/28（fork 首发 · 3.26112817）**
+- 新增通用**扩展包框架**：zip / 单文件包（manifest + JS / DEX / native .so）导入即用、卸载即删，零系统安装零残留；文件、KV、日志、网络客户端按包隔离，网络未声明即禁、支持域名白名单
+- native 双模式加载：release 且 API≥30 走 memfd 内存加载 + F_SEAL 四封印（不可变内存执行，API 36 设备实证）；自检与诊断红牌如实上报，卸载残留/类驻留不谎报
+- 新增**扩展包管理界面**（导入确认含 manifest 摘要与 SHA-256、启停、自检报告、卸载报告）与四个样例包（hello-js / hello-dex / hello-native / mock-mcp-demo-add）
+- **MCP 服务**支持扩展包注册工具：读工具导入即生效，写工具默认关闭且需显式授权；令牌为空时服务拒绝启动（fail-closed）
+- 质量验收：五轮门禁全绿（pack 单测/Lint/构建/全量单测/设备 connected 测试）、GPT-6.1 五次独立终局复核、app connected 355 用例；修复上游 11 处存量 lint 错误、重建 htmlunit-core-js fork（5.3.0-legado.5）
+- 应用身份切换为 `io.legado.ryz`（与官方可并存）；更新源指向本 fork releases（仅手动检查）
+
+---
+
+> 自 2026/11/28 起为本 fork（io.legado.ryz，[Ryfferty/legado](https://github.com/Ryfferty/legado)）的独立变更记录；以下为继承自上游 [LegadoTeam/legado](https://github.com/LegadoTeam/legado) 的历史日志，保留供参考。
+
 **2026/11/01**
 - 修复段落阅读模式在打开阅读页、页面重建或尺寸变化后可能显示默认背景的问题，保持背景透明度及系统栏边距一致
 
