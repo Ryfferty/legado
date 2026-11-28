@@ -13,11 +13,13 @@ import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.shared.Transport
 import io.modelcontextprotocol.kotlin.sdk.shared.TransportSendOptions
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.GetPromptResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCMessage
 import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCNotification
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -33,6 +35,7 @@ import java.nio.file.Files
 class PackMcpBridgeTest {
 
     private val toolListChanged = "notifications/tools/list_changed"
+    private val promptListChanged = "notifications/prompts/list_changed"
 
     @Test
     fun `pack tools attach and detach for existing and new sessions`() = runBlocking {
@@ -87,6 +90,67 @@ class PackMcpBridgeTest {
         assertFalse(server.tools.containsKey("demo_add"))
         first.awaitNotification(toolListChanged)
         second.awaitNotification(toolListChanged)
+        // The two `awaitNotification` calls above must have consumed exactly
+        // the registration and the revocation notification. A warm-up canary
+        // arriving late would displace one of them, and the displaced
+        // notification would stay unconsumed here -- but only a canary the
+        // SDK has already delivered: one whose emission coroutine has not run
+        // by the final count check below escapes this assertion (declared
+        // limitation, see awaitSessionSubscriptions).
+        first.assertNoResidue()
+        second.assertNoResidue()
+
+        bridge.close()
+        server.close()
+    }
+
+    @Test
+    fun `a canary still in flight during warm-up cannot leak into the formal assertions`() = runBlocking {
+        val server = newServer()
+        val manager = FakePackManager(listOf(PackFixtures.info()))
+        val permissions = PackToolPermissionStore(
+            Files.createTempDirectory("mcp-late").resolve("grants.json").toFile()
+        )
+        val bridge = PackMcpBridge(server, { manager }, permissions)
+        val registry = PackRegistry(reservedToolNames = HostMcpToolNames.RESERVED)
+        bridge.attach(registry)
+
+        val first = RecordingTransport()
+        // Each delayed send emulates a canary stuck inside the SDK collector
+        // pipeline: the message has left the SharedFlow but has not reached
+        // the transport queue yet, so neither the queue nor `sentMessages`
+        // can see it. The first delayed canary lands only after round 1's
+        // one-second window, which forces a second subscription round, and
+        // the second delayed canary is still in flight when the round loop
+        // exits -- the interleaving in which the old 500ms quiet-window drain
+        // returned a "clean" baseline while a canary was on its way.
+        val second = RecordingTransport(delayedSends = 2, sendDelayMillis = 1_100L)
+        server.createSession(first)
+        server.createSession(second)
+        awaitSessionSubscriptions(server, first, second)
+        // The delayed first canary can never land inside round 1's window, so
+        // the warm-up always needed a second round to prove `second`.
+        assertTrue(server.tools.containsKey("subscription_canary_2"))
+
+        val registration = PackRegistration(
+            PackFixtures.ref(),
+            PackFixtures.manifest(),
+        )
+        registry.replaceAll(listOf(registration))
+        assertTrue(server.tools.containsKey("demo_add"))
+        assertEquals(toolListChanged, first.awaitNotification(toolListChanged).method)
+        assertEquals(toolListChanged, second.awaitNotification(toolListChanged).method)
+
+        registry.replaceAll(emptyList())
+        assertFalse(server.tools.containsKey("demo_add"))
+        first.awaitNotification(toolListChanged)
+        second.awaitNotification(toolListChanged)
+        // The late canary must have been drained by the warm-up barrier (the
+        // prompt marker cannot be consumed before it); if it had leaked into
+        // these assertions it would have displaced either the registration
+        // or the revocation notification, which would stay unconsumed here.
+        first.assertNoResidue()
+        second.assertNoResidue()
 
         bridge.close()
         server.close()
@@ -221,6 +285,7 @@ class PackMcpBridgeTest {
         options = ServerOptions(
             capabilities = ServerCapabilities(
                 tools = ServerCapabilities.Tools(listChanged = true),
+                prompts = ServerCapabilities.Prompts(listChanged = true),
                 resources = ServerCapabilities.Resources(),
                 logging = ServerCapabilities.Logging,
             ),
@@ -229,24 +294,44 @@ class PackMcpBridgeTest {
 
     /**
      * The SDK (0.15.0) delivers feature notifications through a SharedFlow with
-     * replay = 0; each session's collector coroutine runs on Dispatchers.Default
-     * and only starts collecting some time after `createSession` returns, so a
-     * `replaceAll` immediately afterwards can race the collector's subscription
-     * and have its notification dropped with no way to recover it.
+     * replay = 0 that is fed by coroutines launched on Dispatchers.Default;
+     * `addTool`/`addPrompt` return before those coroutines have even run, and
+     * each session's collector coroutine only starts collecting some time after
+     * `createSession` returns. Both delays are unbounded, and the transport
+     * counters can only see messages that already reached `send`, so counting
+     * or waiting for silence cannot prove that nothing is still queued inside
+     * the SDK.
      *
-     * The warm-up therefore establishes two explicit baselines per session
-     * before the test body runs:
+     * The warm-up therefore establishes the baseline with a completion barrier
+     * instead of quiet windows:
      *
-     * 1. A subscription witness: every transport must *consume* a canary
-     *    notification of its own. A send-side flag is not a witness — it used
-     *    to be flipped before the message was even queued, and a round that
-     *    spent one shared timeout waiting for the first transport never waited
-     *    for (or consumed) the second transport's canary, which then lingered
-     *    as residue for the rounds that followed.
-     * 2. A consumption baseline: every queue is drained until each transport
-     *    has consumed everything the warm-up sent it, so the assertions in the
-     *    test body can only be satisfied by the notifications their own
-     *    actions produce.
+     * 1. Subscription rounds: exactly one canary emission per round, and every
+     *    session -- including ones that already proved themselves -- must
+     *    *consume* a notification in that round before the next round starts.
+     *    A transport that has not subscribed yet burns only its own deadline
+     *    (the round's canary is dropped for it, replay = 0); a subscribed
+     *    transport always receives the round's canary eventually (the flow
+     *    buffer is unbounded and per-collector delivery is FIFO), so waiting
+     *    it out keeps the queue aligned with the emission sequence instead of
+     *    stranding the canary in a queue for the rounds that follow.
+     * 2. Completion barrier: the last warm-up emission is a *prompt* canary,
+     *    the only prompt notification the warm-up ever produces, and nothing
+     *    is emitted after it. Waiting for every transport to consume that
+     *    marker drains, per collector FIFO order, every tool canary still
+     *    queued or in flight in front of it -- including canaries whose
+     *    emission coroutine ran late. Only at that point do the counters mean
+     *    something: sent == consumed proves every queue is empty.
+     *
+     * The one case no black-box barrier can observe is a canary whose emission
+     * coroutine is starved past the marker itself. The test bodies therefore
+     * end with `assertNoResidue`, which detects exactly the residue the SDK
+     * already delivered but left unconsumed at check time: a late canary that
+     * displaces a notification the body is awaiting makes the displaced
+     * message fail loudly. A canary whose emission has not run by the final
+     * count check escapes both the barrier and the counter comparison -- that
+     * residue is unobservable from the outside and remains a declared,
+     * unverified limitation of this warm-up (the SDK emits from a
+     * Dispatchers.Default launch with no completion barrier to hook).
      */
     private suspend fun awaitSessionSubscriptions(
         server: Server,
@@ -264,26 +349,37 @@ class PackMcpBridgeTest {
                 description = "awaitSessionSubscriptions canary; never invoked",
                 inputSchema = requireNotNull(PackMcpSchema.toToolSchema(PackFixtures.schema())),
             ) { _ -> CallToolResult(content = emptyList()) }
-            // One timeout per still-unproven transport: a transport that has
-            // not subscribed yet burns only its own deadline, and a transport
-            // that proves itself early is left alone instead of sharing one
-            // sequential wait whose timeout can strand another's canary.
-            transports.filter { it.consumedMessages == 0 }.forEach { transport ->
-                withTimeoutOrNull(CANARY_ROUND_TIMEOUT_MS) {
+            transports.forEach { transport ->
+                if (transport.consumedMessages == 0) {
+                    // One timeout per still-unproven transport: a transport that
+                    // has not subscribed yet burns only its own deadline.
+                    withTimeoutOrNull(CANARY_ROUND_TIMEOUT_MS) {
+                        transport.awaitNotification(toolListChanged)
+                    }
+                } else {
+                    // A proven transport is subscribed, so this round's canary
+                    // is already on its way to it; waiting it out is what keeps
+                    // the rounds aligned and lets the marker below terminate
+                    // the warm-up emission sequence.
                     transport.awaitNotification(toolListChanged)
                 }
             }
         }
-        // The witnesses prove each collector ran at some point; canaries from
-        // earlier rounds may still sit in a queue or be in flight behind a
-        // slow collector. Drain every queue until it stays quiet so each
-        // session starts the test body from one known-empty baseline.
-        transports.forEach { it.drainNotifications() }
+        server.addPrompt(
+            name = "subscription_barrier",
+            description = "awaitSessionSubscriptions completion barrier; never invoked",
+        ) { _ -> GetPromptResult(messages = emptyList(), description = "") }
+        transports.forEach { it.awaitNotification(promptListChanged) }
+        transports.forEach { it.assertNoResidue() }
     }
 
-    private class RecordingTransport : Transport {
+    private class RecordingTransport(
+        private val delayedSends: Int = 0,
+        private val sendDelayMillis: Long = 0L,
+    ) : Transport {
         private val messages = Channel<JSONRPCMessage>(Channel.UNLIMITED)
         private var closeBlock: (() -> Unit)? = null
+        private var remainingDelayedSends = delayedSends
 
         /** Messages queued through [send]; counted only after the enqueue. */
         var sentMessages: Int = 0
@@ -296,6 +392,13 @@ class PackMcpBridgeTest {
         override suspend fun start() = Unit
 
         override suspend fun send(message: JSONRPCMessage, options: TransportSendOptions?) {
+            // While this delay runs the message is already inside the SDK
+            // collector pipeline but not yet in the queue and not yet counted:
+            // exactly the in-flight window the warm-up barrier has to wait out.
+            if (remainingDelayedSends > 0) {
+                remainingDelayedSends -= 1
+                delay(sendDelayMillis)
+            }
             messages.send(message)
             sentMessages += 1
         }
@@ -326,23 +429,21 @@ class PackMcpBridgeTest {
             }
 
         /**
-         * Consumes everything queued until the queue stays quiet for a whole
-         * drain window, then requires everything sent to have been consumed.
-         * Warm-up residue left behind here would otherwise satisfy a later
-         * `awaitNotification` that was meant for the notification the test
-         * body itself triggered.
+         * Everything the SDK has delivered must have been consumed by the
+         * notification it was meant for. Warm-up residue already delivered
+         * but left unconsumed here (including a canary that arrived late and
+         * displaced a notification the test body awaited) fails loudly
+         * instead of silently satisfying a later assertion. What this cannot
+         * see is an emission the SDK has not delivered at all by the time of
+         * the check: sentMessages only counts messages that reached the
+         * transport queue, so a starved emission coroutine escaping the
+         * warm-up marker stays undetected (declared limitation).
          */
-        suspend fun drainNotifications() {
-            while (true) {
-                val message = withTimeoutOrNull(DRAIN_QUIET_TIMEOUT_MS) { messages.receive() }
-                if (message == null) {
-                    break
-                }
-                consumedMessages += 1
-            }
+        fun assertNoResidue() {
             check(sentMessages == consumedMessages) {
-                "recording transport drained with " +
-                    "${sentMessages - consumedMessages} message(s) still queued or in flight"
+                "recording transport finished with " +
+                    "${sentMessages - consumedMessages} delivered message(s) unconsumed: " +
+                    "a warm-up canary displaced a notification the test awaited"
             }
         }
     }
@@ -350,6 +451,5 @@ class PackMcpBridgeTest {
     private companion object {
         const val CANARY_ROUNDS = 10
         const val CANARY_ROUND_TIMEOUT_MS = 1_000L
-        const val DRAIN_QUIET_TIMEOUT_MS = 500L
     }
 }

@@ -15,6 +15,8 @@ import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.RootMatchers.isPlatformPopup
+import androidx.test.espresso.matcher.ViewMatchers.hasDescendant
+import androidx.test.espresso.matcher.ViewMatchers.hasSibling
 import androidx.test.espresso.matcher.ViewMatchers.isChecked
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withId
@@ -309,7 +311,13 @@ class PackManageActivityUiTest {
                 assertFalse(PackHost.isPackWriteToolEnabled(packId, "uitest_write"))
                 // 管理对话框显式开启/关闭
                 awaitPacksLoaded(scenario)
-                onView(withId(R.id.iv_menu_more)).perform(click())
+                // 设备上可能并存其他包(如手工安装的样例包), 菜单按钮必须限定到本用例导入的那一行
+                onView(
+                    allOf(
+                        withId(R.id.iv_menu_more),
+                        hasSibling(hasDescendant(withText("UI Test Tools")))
+                    )
+                ).perform(click())
                 onView(withText(R.string.pack_write_tools_menu))
                     .inRoot(isPlatformPopup())
                     .perform(click())
